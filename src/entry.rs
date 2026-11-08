@@ -75,6 +75,7 @@ pub struct Entry {
 	pub comment: Option<String>,
 	pub icon: Option<String>,
 	pub exec: Option<String>,
+	pub launch_animation: Option<String>,
 	pub hidden: bool,
 	pub no_display: bool,
 	pub toggle: bool,
@@ -155,6 +156,7 @@ impl Entry {
 			comment: string("Comment").filter(|comment| !comment.is_empty()),
 			icon: string("Icon").filter(|icon| !icon.is_empty()),
 			exec,
+			launch_animation: string("LaunchAnimation").filter(|value| !value.trim().is_empty()),
 			hidden: value_bool(values.get("Hidden")),
 			no_display: value_bool(values.get("NoDisplay")),
 			toggle: value_bool(values.get("Toggle")),
@@ -162,6 +164,56 @@ impl Entry {
 			custom_group: string("Group").filter(|group| !group.trim().is_empty()),
 			diagnostics,
 		})
+	}
+
+	/// Expand the entry's `Exec=` field codes. `file` fills `%f`/`%u`; the
+	/// entry path fills `%k` and the entry name fills `%c`.
+	pub fn exec_args(&self, file: Option<&Path>) -> Result<Vec<String>, String> {
+		let exec = self
+			.exec
+			.as_deref()
+			.filter(|exec| !exec.trim().is_empty())
+			.ok_or_else(|| String::from("entry has no Exec"))?;
+		let tokens = tokenize_exec(exec)?;
+		let mut args = Vec::new();
+		for token in tokens {
+			if token == "%i" {
+				if let Some(icon) = &self.icon {
+					args.push(String::from("--icon"));
+					args.push(icon.clone());
+				}
+				continue;
+			}
+			let mut expanded = String::new();
+			let mut chars = token.chars();
+			while let Some(character) = chars.next() {
+				if character != '%' {
+					expanded.push(character);
+					continue;
+				}
+				match chars.next() {
+					Some('%') => expanded.push('%'),
+					Some('c') => expanded.push_str(self.name.as_deref().unwrap_or_default()),
+					Some('k') => expanded.push_str(&self.path.to_string_lossy()),
+					Some('f' | 'F' | 'u' | 'U') => {
+						if let Some(file) = file {
+							expanded.push_str(&file.to_string_lossy());
+						}
+					}
+					Some('d' | 'D' | 'n' | 'N' | 'v' | 'm' | 'i') => {}
+					Some(other) => {
+						return Err(format!("unsupported field code %{other} in Exec"));
+					}
+					None => {
+						return Err(String::from("Exec ends with an incomplete field code"));
+					}
+				}
+			}
+			if !expanded.is_empty() {
+				args.push(expanded);
+			}
+		}
+		Ok(args)
 	}
 
 	/// The icon this entry asks for, resolved against the entry file.
@@ -261,6 +313,49 @@ fn diagnostic(path: &Path, message: impl Into<String>) -> ConfigDiagnostic {
 		line: None,
 		message: message.into(),
 	}
+}
+
+fn tokenize_exec(exec: &str) -> Result<Vec<String>, String> {
+	let mut args = Vec::new();
+	let mut token = String::new();
+	let mut chars = exec.chars().peekable();
+	let mut quote = None;
+	let mut token_started = false;
+
+	while let Some(character) = chars.next() {
+		match character {
+			'\\' => {
+				let escaped = chars
+					.next()
+					.ok_or_else(|| String::from("Exec ends with an incomplete escape"))?;
+				token.push(escaped);
+				token_started = true;
+			}
+			'"' | '\'' if quote == Some(character) => quote = None,
+			'"' | '\'' if quote.is_none() => {
+				quote = Some(character);
+				token_started = true;
+			}
+			character if character.is_whitespace() && quote.is_none() => {
+				if token_started {
+					args.push(std::mem::take(&mut token));
+					token_started = false;
+				}
+			}
+			_ => {
+				token.push(character);
+				token_started = true;
+			}
+		}
+	}
+
+	if quote.is_some() {
+		return Err(String::from("Exec contains an unterminated quote"));
+	}
+	if token_started {
+		args.push(token);
+	}
+	Ok(args)
 }
 
 #[cfg(test)]

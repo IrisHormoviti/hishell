@@ -10,6 +10,7 @@ pub enum Error {
 	NotFound(PathBuf),
 	Config(String),
 	Unsupported(&'static str),
+	Launch(crate::execution::LaunchError),
 	Io(std::io::Error),
 }
 
@@ -20,6 +21,7 @@ impl fmt::Display for Error {
 			Self::NotFound(path) => write!(formatter, "not found: {}", path.display()),
 			Self::Config(message) => write!(formatter, "config: {message}"),
 			Self::Unsupported(what) => write!(formatter, "unsupported: {what}"),
+			Self::Launch(error) => write!(formatter, "launch: {error:?}"),
 			Self::Io(error) => write!(formatter, "io: {error}"),
 		}
 	}

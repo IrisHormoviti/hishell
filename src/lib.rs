@@ -10,6 +10,7 @@ pub mod config_parser;
 pub mod engine;
 pub mod entry;
 pub mod error;
+pub mod execution;
 pub mod folder;
 pub mod group;
 pub mod icon;
@@ -32,6 +33,11 @@ pub use engine::{
 };
 pub use entry::{Entry, EntryType};
 pub use error::Error;
+pub use execution::{
+	AppId, Clock, Execution, ExecutionWrapper, ExitStatus, FreeDesktopSpawner, LaunchBlockReason,
+	LaunchError, LaunchEvent, LaunchId, LaunchOutcome, LaunchRequest, LaunchWarning, SpawnRequest,
+	Spawner, SystemClock,
+};
 pub use folder::ScanOptions;
 pub use item::{FsKind, IconRef, Item, ItemId, ItemKind};
 pub use jobs::{CancelToken, JobEvent, JobHandle, JobId, Jobs};

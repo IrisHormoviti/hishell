@@ -3,10 +3,15 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::change::{ChangeScope, ChangeSet, FolderDelta, LocationDelta, SelectionDelta};
 use crate::config::{Config, ConfigKey, ConfigLoad, ConfigValue};
 use crate::error::Error;
+use crate::execution::{
+	Execution, ExecutionWrapper, LaunchEvent, LaunchId, LaunchOutcome, LaunchRequest, Spawner,
+	SystemClock,
+};
 use crate::folder::{Folder, ScanOptions};
 use crate::item::{Item, ItemId};
 use crate::jobs::{JobEvent, JobHandle, Jobs};
@@ -35,13 +40,24 @@ pub struct RuntimeSettings {
 }
 
 /// Services the engine depends on.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 #[non_exhaustive]
-pub struct Deps {}
+pub struct Deps {
+	pub spawner: Option<Arc<dyn Spawner>>,
+}
+
+impl std::fmt::Debug for Deps {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		formatter
+			.debug_struct("Deps")
+			.field("spawner", &self.spawner.is_some())
+			.finish()
+	}
+}
 
 impl Deps {
 	pub fn free_desktop() -> Self {
-		Self {}
+		Self::default()
 	}
 }
 
@@ -90,6 +106,10 @@ pub enum Command {
 	GoUp,
 	Run(crate::ops::Op),
 	CancelJob(JobHandle),
+	Launch(LaunchRequest),
+	ConfirmLaunch(LaunchId),
+	CancelLaunch(LaunchId),
+	QuitActive(PathBuf),
 }
 
 #[derive(Clone, Debug)]
@@ -98,6 +118,8 @@ pub enum Effect {
 	Reload(Vec<PathBuf>),
 	Navigate(NavigationPlan),
 	Job(JobEvent),
+	Launch(LaunchOutcome),
+	LaunchEvent(LaunchEvent),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -124,6 +146,7 @@ pub struct Engine {
 	revision: u64,
 	last_view: RefCell<Option<FolderView>>,
 	jobs: Jobs,
+	execution: Execution,
 }
 
 impl Engine {
@@ -149,6 +172,22 @@ impl Engine {
 		if !location.path().exists() {
 			return Err(Error::NotFound(location.path().to_path_buf()));
 		}
+		let spawner = options
+			.deps
+			.spawner
+			.clone()
+			.unwrap_or_else(|| Arc::new(crate::execution::FreeDesktopSpawner));
+		let wrapper = options
+			.runtime
+			.execution_wrapper
+			.clone()
+			.filter(|command| !command.trim().is_empty())
+			.map(|command| ExecutionWrapper { command });
+		let screen = options
+			.runtime
+			.screen
+			.clone()
+			.filter(|screen| !screen.trim().is_empty());
 		let mut engine = Self {
 			mode: options.mode,
 			location,
@@ -160,6 +199,7 @@ impl Engine {
 			revision: 0,
 			last_view: RefCell::new(None),
 			jobs: Jobs::default(),
+			execution: Execution::new(wrapper, screen, spawner, Arc::new(SystemClock)),
 		};
 		engine.reload();
 		Ok(engine)
@@ -408,6 +448,30 @@ impl Engine {
 					job: Some(handle),
 				});
 			}
+			Command::Launch(request) => {
+				let outcome = self.execution.request(request).map_err(Error::Launch)?;
+				return Ok(Outcome {
+					changes: ChangeSet::default(),
+					effects: vec![Effect::Launch(outcome)],
+					job: None,
+				});
+			}
+			Command::ConfirmLaunch(id) => {
+				self.execution.confirm(id).map_err(Error::Launch)?;
+				return Ok(Outcome {
+					changes: ChangeSet::default(),
+					effects: vec![Effect::Launch(LaunchOutcome::Started)],
+					job: None,
+				});
+			}
+			Command::CancelLaunch(id) => {
+				self.execution.cancel(id);
+				return Ok(Outcome::default());
+			}
+			Command::QuitActive(path) => {
+				self.execution.quit(&path).map_err(Error::Launch)?;
+				return Ok(Outcome::default());
+			}
 		};
 		Ok(Outcome {
 			changes,
@@ -417,10 +481,16 @@ impl Engine {
 	}
 
 	pub fn tick(&mut self) -> TickResult {
+		let mut effects: Vec<Effect> = self.jobs.drain().into_iter().map(Effect::Job).collect();
+		effects.extend(self.execution.poll().into_iter().map(Effect::LaunchEvent));
 		TickResult {
 			changes: ChangeSet::default(),
-			effects: self.jobs.drain().into_iter().map(Effect::Job).collect(),
+			effects,
 		}
+	}
+
+	pub fn execution(&self) -> &Execution {
+		&self.execution
 	}
 
 	/// Whether the current folder's `[Radio]` group accepts `path` as a choice.
@@ -489,6 +559,7 @@ impl Engine {
 		}
 		self.rescan();
 		self.rebuild_diagnostics();
+		self.sync_execution();
 		self.revision += 1;
 		ChangeSet {
 			folder: FolderDelta::Reset,
@@ -498,6 +569,17 @@ impl Engine {
 			}),
 			..ChangeSet::default()
 		}
+	}
+
+	fn sync_execution(&mut self) {
+		let wrapper =
+			(!self.config.execution_wrapper.trim().is_empty()).then(|| ExecutionWrapper {
+				command: self.config.execution_wrapper.clone(),
+			});
+		self.execution.set_wrapper(wrapper);
+		self.execution.set_screen(
+			(!self.config.screen.trim().is_empty()).then(|| self.config.screen.clone()),
+		);
 	}
 
 	fn apply_config_change(&mut self, scope: ChangeScope) -> FolderDelta {
@@ -643,6 +725,38 @@ impl std::fmt::Debug for Engine {
 mod tests {
 	use super::*;
 	use crate::config::ConfigKey;
+
+	struct AcceptAll;
+
+	impl crate::execution::Spawner for AcceptAll {
+		fn command_exists(&self, _command: &str) -> bool {
+			false
+		}
+
+		fn preflight(
+			&self,
+			_wrapper: &str,
+			_request: &crate::execution::SpawnRequest,
+		) -> Option<String> {
+			None
+		}
+
+		fn spawn(
+			&self,
+			_wrapper: Option<&str>,
+			_request: &crate::execution::SpawnRequest,
+		) -> Result<(), crate::execution::LaunchError> {
+			Ok(())
+		}
+
+		fn quit(&self, _wrapper: &str, _item: &Path) -> Result<(), crate::execution::LaunchError> {
+			Ok(())
+		}
+
+		fn active_items(&self, _wrapper: &str) -> Vec<PathBuf> {
+			Vec::new()
+		}
+	}
 
 	trait FolderSlots {
 		fn folder_slots(self) -> Vec<crate::view::SlotSpec>;
@@ -1032,7 +1146,9 @@ mod tests {
 				assert_eq!(plan.to, child);
 				assert_eq!(plan.from, path);
 			}
-			Effect::Reload(_) | Effect::Job(_) => panic!("expected a navigation plan"),
+			Effect::Reload(_) | Effect::Job(_) | Effect::Launch(_) | Effect::LaunchEvent(_) => {
+				panic!("expected a navigation plan")
+			}
 		}
 		std::fs::remove_dir_all(path).unwrap();
 	}
@@ -1079,6 +1195,35 @@ mod tests {
 		}
 		assert!(finished);
 		assert!(!file.exists());
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn launching_an_entry_returns_a_launch_effect() {
+		let path = temp_folder("launch");
+		let entry = path.join("ride.desktop");
+		std::fs::write(
+			&entry,
+			"[Desktop Entry]\nType=Application\nName=Ride\nExec=ride\n",
+		)
+		.unwrap();
+		let mut engine = Engine::open_location_with(
+			Location::folder(&path),
+			OpenOptions {
+				deps: Deps {
+					spawner: Some(Arc::new(AcceptAll)),
+				},
+				..OpenOptions::default()
+			},
+		)
+		.unwrap();
+		let outcome = engine
+			.dispatch(Command::Launch(LaunchRequest::Item { path: entry }))
+			.unwrap();
+		assert!(matches!(
+			outcome.effects[0],
+			Effect::Launch(LaunchOutcome::Started)
+		));
 		std::fs::remove_dir_all(path).unwrap();
 	}
 
