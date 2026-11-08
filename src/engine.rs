@@ -25,6 +25,7 @@ use crate::item::{Item, ItemId};
 use crate::jobs::{JobEvent, JobHandle, Jobs};
 use crate::location::Location;
 use crate::navigation::{NavigationPlan, NavigationRequest, PathRelation, SlotAnchor, relation};
+use crate::prompt::{FrontendRequest, Prompt};
 use crate::selection::Selection;
 use crate::view::{
 	FocusSpec, FolderMode, FolderView, InteractionSpec, ListSpec, PaneId, Preview, ViewRequest,
@@ -135,6 +136,7 @@ pub enum Command {
 	QuitActive(PathBuf),
 	History(HistoryCommand),
 	Focus(FocusCommand),
+	Invoke(ActionId),
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +148,8 @@ pub enum Effect {
 	Launch(LaunchOutcome),
 	LaunchEvent(LaunchEvent),
 	FocusActivate(ItemId),
+	Prompt(Prompt),
+	Frontend(FrontendRequest),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -513,6 +517,9 @@ impl Engine {
 			Command::Focus(command) => {
 				return Ok(self.focus_command(command));
 			}
+			Command::Invoke(action) => {
+				return self.invoke(action);
+			}
 			Command::History(command) => {
 				let entry = match command {
 					HistoryCommand::Back => self.history.back(),
@@ -642,6 +649,167 @@ impl Engine {
 				}
 			})
 			.collect()
+	}
+
+	fn invoke(&mut self, action: ActionId) -> Result<Outcome, Error> {
+		let ids = self.invoke_targets();
+		let items: Vec<Item> = ids
+			.iter()
+			.filter_map(|id| self.item(*id).cloned())
+			.collect();
+		let paths: Vec<PathBuf> = items.iter().map(|item| item.path.clone()).collect();
+		let first = items.first().cloned();
+		match action {
+			ActionId::OPEN | ActionId::NAVIGATE => match first {
+				Some(item) => self.open_item(&item),
+				None => Ok(outcome(vec![Effect::Frontend(FrontendRequest::Action(
+					action,
+				))])),
+			},
+			ActionId::REFRESH => self.dispatch(Command::Reload),
+			ActionId::GO_UP => self.dispatch(Command::GoUp),
+			ActionId::SELECT_ALL => self.dispatch(Command::SelectAll),
+			ActionId::NEW_FOLDER => self.dispatch(Command::Run(crate::ops::Op::NewFolder {
+				parent: self.folder_path(),
+			})),
+			ActionId::NEW_TEXT_FILE => self.dispatch(Command::Run(crate::ops::Op::NewTextFile {
+				parent: self.folder_path(),
+			})),
+			ActionId::TRASH => {
+				if paths.is_empty() {
+					return Ok(Outcome::default());
+				}
+				self.dispatch(Command::Run(crate::ops::Op::Trash { paths }))
+			}
+			ActionId::DELETE => {
+				if paths.is_empty() {
+					return Ok(Outcome::default());
+				}
+				self.dispatch(Command::Run(crate::ops::Op::Delete { paths }))
+			}
+			ActionId::DUPLICATE => {
+				if paths.is_empty() {
+					return Ok(Outcome::default());
+				}
+				self.dispatch(Command::Run(crate::ops::Op::Duplicate { paths }))
+			}
+			ActionId::CREATE_LINK => {
+				if paths.is_empty() {
+					return Ok(Outcome::default());
+				}
+				self.dispatch(Command::Run(crate::ops::Op::Link {
+					sources: paths,
+					dest: self.folder_path(),
+				}))
+			}
+			ActionId::ROTATE_IMAGE => match first {
+				Some(item)
+					if item
+						.mime
+						.as_deref()
+						.is_some_and(|mime| mime.starts_with("image/")) =>
+				{
+					self.dispatch(Command::Run(crate::ops::Op::RotateImage {
+						path: item.path,
+						degrees: 90,
+					}))
+				}
+				_ => Ok(outcome(vec![Effect::Frontend(FrontendRequest::Action(
+					action,
+				))])),
+			},
+			ActionId::RENAME => match first {
+				Some(item) => Ok(outcome(vec![Effect::Prompt(Prompt::Rename {
+					suggested: item.title,
+					path: item.path,
+				})])),
+				None => Ok(Outcome::default()),
+			},
+			ActionId::OPEN_WITH => match first {
+				Some(item) => Ok(outcome(vec![Effect::Prompt(Prompt::OpenWith {
+					path: item.path,
+				})])),
+				None => Ok(Outcome::default()),
+			},
+			ActionId::DESTROY => Ok(outcome(vec![Effect::Prompt(Prompt::Destroy { paths })])),
+			ActionId::NUMBER => match first {
+				Some(item) => Ok(outcome(vec![Effect::Prompt(Prompt::Number {
+					path: item.path,
+				})])),
+				None => Ok(Outcome::default()),
+			},
+			ActionId::TOGGLE => match first {
+				Some(item) => {
+					self.dispatch(Command::Run(crate::ops::Op::Toggle { path: item.path }))
+				}
+				None => Ok(Outcome::default()),
+			},
+			ActionId::QUIT_ACTIVE => match first {
+				Some(item) => self.dispatch(Command::QuitActive(item.path)),
+				None => Ok(Outcome::default()),
+			},
+			ActionId::VIEW_SETTINGS => Ok(outcome(vec![Effect::Frontend(
+				FrontendRequest::ViewSettings,
+			)])),
+			_ => Ok(outcome(vec![Effect::Frontend(FrontendRequest::Action(
+				action,
+			))])),
+		}
+	}
+
+	fn invoke_targets(&self) -> Vec<ItemId> {
+		if let Some(selection) = self.selection()
+			&& selection.active()
+			&& !selection.is_empty()
+		{
+			return selection.items().to_vec();
+		}
+		self.focus.item().into_iter().collect()
+	}
+
+	fn open_item(&mut self, item: &Item) -> Result<Outcome, Error> {
+		match item.kind {
+			crate::item::ItemKind::Application
+			| crate::item::ItemKind::Button
+			| crate::item::ItemKind::Toggle
+			| crate::item::ItemKind::Number
+			| crate::item::ItemKind::Radio => {
+				return self.dispatch(Command::Launch(LaunchRequest::Item {
+					path: item.path.clone(),
+				}));
+			}
+			crate::item::ItemKind::Link => {
+				if let Some(target) = &item.target {
+					let request = NavigationRequest {
+						pane: self.focus.pane(),
+						target: target.clone(),
+						record_history: true,
+					};
+					return self.dispatch(Command::Navigate(request));
+				}
+			}
+			crate::item::ItemKind::Directory | crate::item::ItemKind::File => {}
+		}
+		if item.fs_kind == crate::item::FsKind::Directory {
+			let request = NavigationRequest {
+				pane: self.focus.pane(),
+				target: item.path.clone(),
+				record_history: true,
+			};
+			return self.dispatch(Command::Navigate(request));
+		}
+		let apps = self.platform.apps.clone();
+		if let Some(apps) = apps
+			&& let Some(app) = apps.default_app(&item.path)
+		{
+			return self.dispatch(Command::Launch(LaunchRequest::App {
+				path: item.path.clone(),
+				app: crate::execution::AppId(app.path.to_string_lossy().into_owned()),
+			}));
+		}
+		Ok(outcome(vec![Effect::Frontend(FrontendRequest::OpenPath(
+			item.path.clone(),
+		))]))
 	}
 
 	fn focus_command(&mut self, command: FocusCommand) -> Outcome {
@@ -910,6 +1078,14 @@ impl Engine {
 		{
 			self.config.screen = screen.clone();
 		}
+	}
+}
+
+fn outcome(effects: Vec<Effect>) -> Outcome {
+	Outcome {
+		changes: ChangeSet::default(),
+		effects,
+		job: None,
 	}
 }
 
@@ -1397,7 +1573,9 @@ mod tests {
 			| Effect::Job(_)
 			| Effect::Launch(_)
 			| Effect::LaunchEvent(_)
-			| Effect::FocusActivate(_) => panic!("expected a navigation plan"),
+			| Effect::FocusActivate(_)
+			| Effect::Prompt(_)
+			| Effect::Frontend(_) => panic!("expected a navigation plan"),
 		}
 		std::fs::remove_dir_all(path).unwrap();
 	}
@@ -1550,6 +1728,101 @@ mod tests {
 		assert!(ids.contains(&"new-folder"));
 		assert!(ids.contains(&"refresh"));
 		assert!(!ids.contains(&"rename"));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn invoke_routes_prompts_and_operations() {
+		let path = temp_folder("invoke");
+		let file = path.join("a.txt");
+		std::fs::write(&file, b"x").unwrap();
+		let folder = path.join("sub");
+		std::fs::create_dir_all(&folder).unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: file.clone(),
+			}))
+			.unwrap();
+		let outcome = engine.dispatch(Command::Invoke(ActionId::RENAME)).unwrap();
+		match &outcome.effects[0] {
+			Effect::Prompt(Prompt::Rename { path, suggested }) => {
+				assert_eq!(path, &file);
+				assert_eq!(suggested, "a.txt");
+			}
+			_ => panic!("expected a rename prompt"),
+		}
+
+		let outcome = engine
+			.dispatch(Command::Invoke(ActionId::NEW_FOLDER))
+			.unwrap();
+		assert!(outcome.job.is_some());
+		let mut created = false;
+		for _ in 0..200 {
+			for effect in engine.tick().effects {
+				if let Effect::Job(crate::jobs::JobEvent::Finished { outcome, .. }) = effect
+					&& outcome.failed.is_empty()
+				{
+					created = true;
+				}
+			}
+			if created {
+				break;
+			}
+			std::thread::sleep(std::time::Duration::from_millis(10));
+		}
+		assert!(created);
+
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: folder.clone(),
+			}))
+			.unwrap();
+		let outcome = engine.dispatch(Command::Invoke(ActionId::OPEN)).unwrap();
+		assert!(matches!(outcome.effects[0], Effect::Navigate(_)));
+		assert_eq!(engine.location().path(), folder);
+
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn invoke_trash_and_rotate_run_jobs() {
+		let path = temp_folder("invoke-ops");
+		let image = path.join("a.png");
+		image::RgbaImage::new(2, 2).save(&image).unwrap();
+		let text = path.join("b.txt");
+		std::fs::write(&text, b"x").unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+
+		engine
+			.dispatch(Command::SelectOnly(engine.item_at(&image).unwrap().id))
+			.unwrap();
+		let outcome = engine
+			.dispatch(Command::Invoke(ActionId::ROTATE_IMAGE))
+			.unwrap();
+		assert!(outcome.job.is_some());
+		engine.dispatch(Command::ClearSelection).unwrap();
+
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: text.clone(),
+			}))
+			.unwrap();
+		let outcome = engine.dispatch(Command::Invoke(ActionId::DELETE)).unwrap();
+		assert!(outcome.job.is_some());
+		for _ in 0..200 {
+			let _ = engine.tick();
+			if !text.exists() {
+				break;
+			}
+			std::thread::sleep(std::time::Duration::from_millis(10));
+		}
+		assert!(!text.exists());
+		assert!(image.exists());
 		std::fs::remove_dir_all(path).unwrap();
 	}
 

@@ -31,6 +31,7 @@ impl ActionId {
 	pub const CREATE_LINK: Self = Self("create-link");
 	pub const RENAME: Self = Self("rename");
 	pub const TRASH: Self = Self("trash");
+	pub const DELETE: Self = Self("delete");
 	pub const DESTROY: Self = Self("destroy");
 	pub const PROPERTIES: Self = Self("properties");
 	pub const GO_UP: Self = Self("go-up");
@@ -340,6 +341,16 @@ pub static DESCRIPTORS: &[ActionDescriptor] = &[
 		icon_name: "edit-delete",
 		default_shortcut: Some("Delete"),
 		i18n_key: "trash",
+	},
+	ActionDescriptor {
+		id: ActionId::DELETE,
+		group: GROUP_DANGEROUS,
+		subjects: ActionSubjects::ITEMS,
+		menus: CONTEXT,
+		location: LocationScope::Both,
+		icon_name: "edit-delete",
+		default_shortcut: None,
+		i18n_key: "delete",
 	},
 	ActionDescriptor {
 		id: ActionId::DESTROY,

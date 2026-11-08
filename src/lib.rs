@@ -25,6 +25,7 @@ pub mod navigation;
 pub mod ops;
 pub mod path;
 pub mod platform;
+pub mod prompt;
 pub mod selection;
 pub mod session;
 pub mod squashfs;
@@ -64,6 +65,7 @@ pub use platform::{
 	AppCatalog, AppEntry, FreeDesktopApps, FreeDesktopMime, Launcher, Mime, MimeResolver, Platform,
 	PlatformError, Portal, PortalState, SoundPlayer, Thumbnail, ThumbnailRequest, Thumbnailer,
 };
+pub use prompt::{FrontendRequest, Notice, Prompt};
 pub use selection::{Selection, SelectionStatus};
 pub use session::{SCHEMA_VERSION, SessionData, SessionStore};
 pub use value::ConfigValue;
