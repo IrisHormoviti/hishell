@@ -4,6 +4,7 @@
 //! file operations, navigation plans, and history. It is a pure Rust library:
 //! frontends depend on it and render the state it produces.
 
+pub mod action;
 pub mod change;
 pub mod config;
 pub mod config_parser;
@@ -30,6 +31,10 @@ pub mod squashfs;
 pub mod value;
 pub mod view;
 
+pub use action::{
+	ActionDescriptor, ActionGroup, ActionId, ActionRequest, ActionSpec, ActionSubjects,
+	DisabledReason, GroupId, MenuKind, Target,
+};
 pub use change::{ChangeScope, ChangeSet, FolderDelta};
 pub use config::{Config, ConfigDelta, ConfigDiagnostic, ConfigKey, ConfigLoad, LocationScope};
 pub use engine::{

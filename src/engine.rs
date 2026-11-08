@@ -5,6 +5,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::action::{
+	ActionDescriptor, ActionId, ActionRequest, ActionSpec, ActionSubjects, Target, descriptor,
+	menu_contains,
+};
 use crate::change::{
 	ChangeScope, ChangeSet, FocusDelta, FolderDelta, LocationDelta, SelectionDelta,
 };
@@ -564,6 +568,82 @@ impl Engine {
 		self.focus.item()
 	}
 
+	pub fn descriptor(&self, id: ActionId) -> &'static ActionDescriptor {
+		descriptor(id).expect("known action")
+	}
+
+	pub fn actions(&self, request: &ActionRequest) -> Vec<ActionSpec> {
+		let mut items: Vec<&Item> = match &request.target {
+			Target::Location => Vec::new(),
+			Target::Focus => self
+				.focus
+				.item()
+				.and_then(|id| self.item(id))
+				.into_iter()
+				.collect(),
+			Target::Selection => {
+				let selected = self.selection().map(Selection::items).unwrap_or_default();
+				selected
+					.into_iter()
+					.filter_map(|id| self.item(*id))
+					.collect()
+			}
+			Target::Items(ids) => ids.iter().filter_map(|id| self.item(*id)).collect(),
+			Target::Auto => {
+				let selection = self.selection();
+				if selection.is_some_and(Selection::active) {
+					selection
+						.map(Selection::items)
+						.unwrap_or_default()
+						.into_iter()
+						.filter_map(|id| self.item(*id))
+						.collect()
+				} else {
+					self.focus
+						.item()
+						.and_then(|id| self.item(id))
+						.into_iter()
+						.collect()
+				}
+			}
+		};
+		let has_items = !items.is_empty();
+		let mut subjects = ActionSubjects::HERE;
+		for item in items.drain(..) {
+			subjects = subjects.union(item_subjects(item));
+		}
+		let scope = self.location.kind();
+		let location = match scope {
+			crate::location::LocationKind::Folder => crate::config::LocationScope::Folder,
+			crate::location::LocationKind::File => crate::config::LocationScope::File,
+		};
+
+		crate::action::DESCRIPTORS
+			.iter()
+			.filter(|descriptor| {
+				(descriptor.location == crate::config::LocationScope::Both
+					|| descriptor.location == location)
+					&& menu_contains(descriptor, request.menu)
+					&& (descriptor.subjects.contains(ActionSubjects::HERE)
+						|| subjects.intersects(descriptor.subjects))
+			})
+			.map(|descriptor| {
+				let needs_items = !descriptor.subjects.contains(ActionSubjects::HERE);
+				let enabled = !needs_items || has_items;
+				ActionSpec {
+					id: descriptor.id,
+					group: descriptor.group,
+					subjects: descriptor.subjects,
+					location: descriptor.location,
+					enabled,
+					visible: true,
+					checked: None,
+					disabled_reason: (!enabled).then_some(crate::action::DisabledReason::NoItems),
+				}
+			})
+			.collect()
+	}
+
 	fn focus_command(&mut self, command: FocusCommand) -> Outcome {
 		let previous = self.focus.item();
 		let order = self
@@ -833,6 +913,34 @@ impl Engine {
 	}
 }
 
+fn item_subjects(item: &Item) -> ActionSubjects {
+	use crate::item::{FsKind, ItemKind};
+	let mut subjects = match item.fs_kind {
+		FsKind::Directory => ActionSubjects::FOLDER,
+		FsKind::File => ActionSubjects::FILE,
+	};
+	subjects = subjects.union(match item.kind {
+		ItemKind::Directory => ActionSubjects::FOLDER,
+		ItemKind::File => ActionSubjects::FILE,
+		ItemKind::Application => ActionSubjects::APPLICATION,
+		ItemKind::Link => ActionSubjects::LINK,
+		ItemKind::Button => ActionSubjects::BUTTON,
+		ItemKind::Toggle => ActionSubjects::TOGGLE,
+		ItemKind::Number => ActionSubjects::NUMBER,
+		ItemKind::Radio => ActionSubjects::RADIO,
+	});
+	if let Some(mime) = item.mime.as_deref() {
+		if mime.starts_with("image/") {
+			subjects = subjects.union(ActionSubjects::IMAGE);
+		} else if mime.starts_with("audio/") {
+			subjects = subjects.union(ActionSubjects::AUDIO);
+		} else if mime.starts_with("video/") {
+			subjects = subjects.union(ActionSubjects::VIDEO);
+		}
+	}
+	subjects
+}
+
 fn raw_config(runtime: &RuntimeSettings) -> Config {
 	let middle_layout = if runtime.default_layout.is_empty() {
 		vec![String::from("./")]
@@ -862,6 +970,7 @@ impl std::fmt::Debug for Engine {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::action::MenuKind;
 	use crate::config::ConfigKey;
 
 	struct AcceptAll;
@@ -1387,6 +1496,60 @@ mod tests {
 			.unwrap();
 		assert_eq!(engine.location().path(), path);
 		assert!(engine.history().can_forward);
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn actions_filter_by_target_and_item_kind() {
+		let path = temp_folder("actions");
+		let image = path.join("a.png");
+		let text = path.join("b.txt");
+		std::fs::write(&image, b"x").unwrap();
+		std::fs::write(&text, b"x").unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: image.clone(),
+			}))
+			.unwrap();
+		let request = ActionRequest {
+			menu: MenuKind::Context,
+			target: Target::Focus,
+		};
+		let ids: Vec<&str> = engine
+			.actions(&request)
+			.iter()
+			.map(|action| action.id.as_str())
+			.collect();
+		assert!(ids.contains(&"rotate-image"));
+		assert!(ids.contains(&"rename"));
+		assert!(!ids.contains(&"toggle"));
+
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: text,
+			}))
+			.unwrap();
+		let ids: Vec<&str> = engine
+			.actions(&request)
+			.iter()
+			.map(|action| action.id.as_str())
+			.collect();
+		assert!(!ids.contains(&"rotate-image"));
+
+		let ids: Vec<&str> = engine
+			.actions(&ActionRequest {
+				menu: MenuKind::Context,
+				target: Target::Location,
+			})
+			.iter()
+			.map(|action| action.id.as_str())
+			.collect();
+		assert!(ids.contains(&"new-folder"));
+		assert!(ids.contains(&"refresh"));
+		assert!(!ids.contains(&"rename"));
 		std::fs::remove_dir_all(path).unwrap();
 	}
 
