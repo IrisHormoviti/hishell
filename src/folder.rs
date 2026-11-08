@@ -51,10 +51,7 @@ impl Folder {
 						} else {
 							None
 						},
-						icon: match fs_kind {
-							FsKind::Directory => IconRef::Theme(String::from("folder")),
-							FsKind::File => IconRef::Theme(String::from("text-x-generic")),
-						},
+						icon: icon_for(fs_kind, mime_for(&entry.path()).as_deref()),
 						is_symlink,
 						is_dotfile: name.starts_with('.'),
 						size: metadata
@@ -171,6 +168,28 @@ impl Folder {
 
 fn directory_first(left: &Item, right: &Item) -> std::cmp::Ordering {
 	right.fs_kind.cmp(&left.fs_kind)
+}
+
+fn icon_for(kind: FsKind, mime: Option<&str>) -> IconRef {
+	if kind == FsKind::Directory {
+		return IconRef::Theme(String::from("folder"));
+	}
+	let name = match mime.unwrap_or_default() {
+		mime if mime.starts_with("image/") => "image-x-generic",
+		mime if mime.starts_with("audio/") => "audio-x-generic",
+		mime if mime.starts_with("video/") => "video-x-generic",
+		"application/pdf" => "application-pdf",
+		"application/zip"
+		| "application/x-tar"
+		| "application/x-compressed-tar"
+		| "application/gzip"
+		| "application/x-7z-compressed"
+		| "application/x-rar" => "package-x-generic",
+		"application/x-executable" | "application/x-sharedlib" => "application-x-executable",
+		"text/html" | "text/xml" | "application/json" => "text-html",
+		_ => "text-x-generic",
+	};
+	IconRef::Theme(String::from(name))
 }
 
 fn mime_for(path: &Path) -> Option<String> {
