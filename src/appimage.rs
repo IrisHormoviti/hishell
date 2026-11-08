@@ -266,6 +266,17 @@ mod tests {
 	}
 
 	#[test]
+	fn reads_a_real_appimage() {
+		let path = Path::new("/home/iris/Applications/aseprite.appimage");
+		if !path.exists() {
+			return;
+		}
+		let entry = entry(path).expect("embedded entry");
+		assert_eq!(entry.name.as_deref(), Some("Aseprite"));
+		assert!(entry.icon.is_some());
+	}
+
+	#[test]
 	fn parses_embedded_entry_fields() {
 		let entry = parse_entry(
 			b"[Desktop Entry]\nType=Application\nName=Aseprite\nComment=Pixel\\nart\nIcon=aseprite\n",
