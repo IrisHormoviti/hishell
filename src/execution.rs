@@ -316,6 +316,12 @@ impl Execution {
 		self.active.contains_key(item)
 	}
 
+	pub fn active_launch(&self, item: &Path) -> Option<(LaunchId, u64)> {
+		self.active
+			.get(item)
+			.map(|active| (active.id, active.started_ms))
+	}
+
 	pub fn poll(&mut self) -> Vec<LaunchEvent> {
 		self.last_poll = self.clock.now_ms();
 		self.spawner.poll()
