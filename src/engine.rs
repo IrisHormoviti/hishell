@@ -13,6 +13,7 @@ use crate::execution::{
 	SystemClock,
 };
 use crate::folder::{Folder, ScanOptions};
+use crate::history::{History, HistoryCommand, HistoryEntry, HistoryStatus};
 use crate::item::{Item, ItemId};
 use crate::jobs::{JobEvent, JobHandle, Jobs};
 use crate::location::Location;
@@ -125,6 +126,7 @@ pub enum Command {
 	ConfirmLaunch(LaunchId),
 	CancelLaunch(LaunchId),
 	QuitActive(PathBuf),
+	History(HistoryCommand),
 }
 
 #[derive(Clone, Debug)]
@@ -163,6 +165,7 @@ pub struct Engine {
 	jobs: Jobs,
 	execution: Execution,
 	platform: crate::platform::Platform,
+	history: History,
 }
 
 impl Engine {
@@ -217,8 +220,14 @@ impl Engine {
 			jobs: Jobs::default(),
 			execution: Execution::new(wrapper, screen, spawner, Arc::new(SystemClock)),
 			platform: options.deps.platform,
+			history: History::default(),
 		};
 		engine.reload();
+		engine.history.record(HistoryEntry {
+			pane: PaneId(0),
+			path: engine.folder_path(),
+			focus: None,
+		});
 		Ok(engine)
 	}
 
@@ -434,7 +443,8 @@ impl Engine {
 			}
 			Command::Navigate(request) => {
 				let plan = self.navigation_plan(&request);
-				return Ok(self.navigate(plan));
+				let record = request.record_history;
+				return Ok(self.navigate(plan, record));
 			}
 			Command::GoUp => {
 				let request = NavigationRequest {
@@ -447,7 +457,7 @@ impl Engine {
 					record_history: true,
 				};
 				let plan = self.navigation_plan(&request);
-				return Ok(self.navigate(plan));
+				return Ok(self.navigate(plan, true));
 			}
 			Command::Run(op) => {
 				let job = self.jobs.submit(op);
@@ -489,6 +499,28 @@ impl Engine {
 				self.execution.quit(&path).map_err(Error::Launch)?;
 				return Ok(Outcome::default());
 			}
+			Command::History(command) => {
+				let entry = match command {
+					HistoryCommand::Back => self.history.back(),
+					HistoryCommand::Forward => self.history.forward(),
+					HistoryCommand::Clear => {
+						self.history.clear();
+						None
+					}
+				};
+				let Some(entry) = entry else {
+					return Ok(Outcome::default());
+				};
+				let target = entry.focus.clone().unwrap_or_else(|| entry.path.clone());
+				let request = NavigationRequest {
+					pane: entry.pane,
+					target,
+					record_history: false,
+				};
+				let mut plan = self.navigation_plan(&request);
+				plan.focus = entry.focus;
+				return Ok(self.navigate(plan, false));
+			}
 		};
 		Ok(Outcome {
 			changes,
@@ -510,6 +542,14 @@ impl Engine {
 		&self.execution
 	}
 
+	pub fn history(&self) -> HistoryStatus {
+		self.history.status()
+	}
+
+	pub fn history_entries(&self) -> (Vec<HistoryEntry>, usize) {
+		self.history.entries()
+	}
+
 	/// Whether the current folder's `[Radio]` group accepts `path` as a choice.
 	pub fn is_radio_member(&self, path: &Path) -> bool {
 		self.folder
@@ -524,10 +564,17 @@ impl Engine {
 		}
 	}
 
-	fn navigate(&mut self, plan: NavigationPlan) -> Outcome {
+	fn navigate(&mut self, plan: NavigationPlan, record: bool) -> Outcome {
 		self.location = Location::folder(plan.to.clone());
 		self.folder = None;
 		let changes = self.reload();
+		if record {
+			self.history.record(HistoryEntry {
+				pane: plan.pane,
+				path: plan.to.clone(),
+				focus: plan.focus.clone(),
+			});
+		}
 		Outcome {
 			changes,
 			effects: vec![Effect::Navigate(plan)],
@@ -1233,6 +1280,28 @@ mod tests {
 			outcome.effects[0],
 			Effect::Launch(LaunchOutcome::Started)
 		));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn navigation_records_history_and_back_replays_it() {
+		let path = temp_folder("history");
+		let child = path.join("child");
+		std::fs::create_dir_all(&child).unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		engine
+			.dispatch(Command::Navigate(NavigationRequest {
+				pane: PaneId(0),
+				target: child.clone(),
+				record_history: true,
+			}))
+			.unwrap();
+		assert!(engine.history().can_back);
+		engine
+			.dispatch(Command::History(HistoryCommand::Back))
+			.unwrap();
+		assert_eq!(engine.location().path(), path);
+		assert!(engine.history().can_forward);
 		std::fs::remove_dir_all(path).unwrap();
 	}
 

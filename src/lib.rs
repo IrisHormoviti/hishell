@@ -13,6 +13,7 @@ pub mod error;
 pub mod execution;
 pub mod folder;
 pub mod group;
+pub mod history;
 pub mod icon;
 pub mod item;
 pub mod jobs;
@@ -23,6 +24,7 @@ pub mod ops;
 pub mod path;
 pub mod platform;
 pub mod selection;
+pub mod session;
 pub mod squashfs;
 pub mod value;
 pub mod view;
@@ -40,6 +42,7 @@ pub use execution::{
 	Spawner, SystemClock,
 };
 pub use folder::ScanOptions;
+pub use history::{History, HistoryCommand, HistoryEntry, HistoryStatus};
 pub use item::{FsKind, IconRef, Item, ItemId, ItemKind};
 pub use jobs::{CancelToken, JobEvent, JobHandle, JobId, Jobs};
 pub use location::{File, Folder, Location, LocationKind};
@@ -55,6 +58,7 @@ pub use platform::{
 	PlatformError, Portal, PortalState, SoundPlayer, Thumbnail, ThumbnailRequest, Thumbnailer,
 };
 pub use selection::{Selection, SelectionStatus};
+pub use session::{SCHEMA_VERSION, SessionData, SessionStore};
 pub use value::ConfigValue;
 pub use view::{
 	FileView, FolderMode, FolderView, GridMode, GridSizing, GridSpec, Metrics, ViewRequest,
