@@ -14,7 +14,7 @@ pub enum Direction {
 	Down,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum FocusCommand {
 	Register(PaneId),
 	Release(PaneId),
@@ -33,6 +33,13 @@ pub enum FocusCommand {
 		pane: PaneId,
 		columns: i32,
 		rows: i32,
+	},
+	SetGeometry {
+		pane: PaneId,
+		x: f64,
+		y: f64,
+		width: f64,
+		height: f64,
 	},
 	SetEmptySlots {
 		pane: PaneId,
@@ -69,6 +76,10 @@ pub struct PaneFocus {
 	active: bool,
 	columns: usize,
 	horizontal: bool,
+	x: f64,
+	y: f64,
+	width: f64,
+	height: f64,
 }
 
 impl Default for PaneFocus {
@@ -84,6 +95,10 @@ impl Default for PaneFocus {
 			active: false,
 			columns: 1,
 			horizontal: false,
+			x: 0.0,
+			y: 0.0,
+			width: 0.0,
+			height: 0.0,
 		}
 	}
 }
@@ -484,6 +499,72 @@ impl Focus {
 			.unwrap_or(-1)
 	}
 
+	/// Move the focus into the pane on the requested side when the cursor
+	/// cannot advance inside its own pane. Geometry is the adapter's layout,
+	/// so the core only compares the rectangles it was given.
+	fn handoff(&mut self, from: PaneId, direction: Direction) -> bool {
+		let Some(pane) = self.panes.get(&from).cloned() else {
+			return false;
+		};
+		if pane.count() == 0 {
+			return false;
+		}
+		let overlaps = |a: f64, a_end: f64, b: f64, b_end: f64| a < b_end - 1.0 && b < a_end - 1.0;
+		let from_x_end = pane.x + pane.width;
+		let from_y_end = pane.y + pane.height;
+		let mut best: Option<(f64, PaneId)> = None;
+		for (&id, candidate) in &self.panes {
+			if id == from || candidate.count() == 0 {
+				continue;
+			}
+			let candidate_x_end = candidate.x + candidate.width;
+			let candidate_y_end = candidate.y + candidate.height;
+			let (valid, distance) = match direction {
+				Direction::Right => (
+					candidate.x >= from_x_end - 1.0
+						&& overlaps(pane.y, from_y_end, candidate.y, candidate_y_end),
+					candidate.x - from_x_end,
+				),
+				Direction::Left => (
+					candidate_x_end <= pane.x + 1.0
+						&& overlaps(pane.y, from_y_end, candidate.y, candidate_y_end),
+					pane.x - candidate_x_end,
+				),
+				Direction::Down => (
+					candidate.y >= from_y_end - 1.0
+						&& overlaps(pane.x, from_x_end, candidate.x, candidate_x_end),
+					candidate.y - from_y_end,
+				),
+				Direction::Up => (
+					candidate_y_end <= pane.y + 1.0
+						&& overlaps(pane.x, from_x_end, candidate.x, candidate_x_end),
+					pane.y - candidate_y_end,
+				),
+			};
+			if valid && best.is_none_or(|(best_distance, _)| distance < best_distance) {
+				best = Some((distance, id));
+			}
+		}
+		let Some((_, neighbour_id)) = best else {
+			return false;
+		};
+		let (row, column) = pane.row_column();
+		let Some(neighbour) = self.panes.get_mut(&neighbour_id) else {
+			return false;
+		};
+		let entry = match direction {
+			Direction::Right => neighbour.index_at(row, 0),
+			Direction::Left => neighbour.index_at(row, neighbour.grid_columns() - 1),
+			Direction::Down => neighbour.index_at(0, column),
+			Direction::Up => neighbour.index_at(neighbour.rows() - 1, column),
+		};
+		neighbour.index = entry.max(0);
+		neighbour.active = true;
+		neighbour.sync_cursor_to_index();
+		self.active = neighbour_id;
+		true
+	}
+
 	pub fn apply(&mut self, command: FocusCommand) -> bool {
 		match command {
 			FocusCommand::Register(pane) => {
@@ -580,6 +661,20 @@ impl Focus {
 				}
 				true
 			}
+			FocusCommand::SetGeometry {
+				pane,
+				x,
+				y,
+				width,
+				height,
+			} => {
+				let entry = self.panes.entry(pane).or_default();
+				entry.x = x;
+				entry.y = y;
+				entry.width = width;
+				entry.height = height;
+				true
+			}
 			FocusCommand::SetEmptySlots { pane, enabled } => {
 				let entry = self.panes.entry(pane).or_default();
 				entry.empty_slots = enabled;
@@ -609,11 +704,13 @@ impl Focus {
 			}
 			FocusCommand::First => self.panes.entry(self.active).or_default().first(),
 			FocusCommand::Last => self.panes.entry(self.active).or_default().last(),
-			FocusCommand::Move(direction) => self
-				.panes
-				.entry(self.active)
-				.or_default()
-				.move_focus(direction),
+			FocusCommand::Move(direction) => {
+				let current = self.active;
+				if self.panes.entry(current).or_default().move_focus(direction) {
+					return true;
+				}
+				self.handoff(current, direction)
+			}
 			FocusCommand::Activate => false,
 			FocusCommand::Set { pane, path } => {
 				let entry = self.panes.entry(pane).or_default();
@@ -821,6 +918,45 @@ mod tests {
 		focus.apply(FocusCommand::First);
 		assert_eq!(focus.item(), Some(ItemId::new(10)));
 		assert_eq!(focus.pane_index(first), 3);
+	}
+
+	#[test]
+	fn moving_past_an_edge_hands_off_to_the_neighbour() {
+		let mut focus = Focus::default();
+		let left = PaneId(0);
+		let right = PaneId(1);
+		focus.apply(FocusCommand::Register(right));
+		focus.apply(FocusCommand::SetOrder {
+			pane: left,
+			order: (0..3).map(ItemId::new).collect(),
+			columns: 3,
+			horizontal: false,
+		});
+		focus.apply(FocusCommand::SetOrder {
+			pane: right,
+			order: (10..13).map(ItemId::new).collect(),
+			columns: 3,
+			horizontal: false,
+		});
+		focus.apply(FocusCommand::SetGeometry {
+			pane: left,
+			x: 0.0,
+			y: 0.0,
+			width: 100.0,
+			height: 100.0,
+		});
+		focus.apply(FocusCommand::SetGeometry {
+			pane: right,
+			x: 100.0,
+			y: 0.0,
+			width: 100.0,
+			height: 100.0,
+		});
+		focus.apply(FocusCommand::ActivatePane(left));
+		focus.apply(FocusCommand::Last);
+		assert!(focus.apply(FocusCommand::Move(Direction::Right)));
+		assert_eq!(focus.pane(), right);
+		assert_eq!(focus.item(), Some(ItemId::new(10)));
 	}
 
 	#[test]
