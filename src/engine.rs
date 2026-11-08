@@ -819,9 +819,14 @@ impl Engine {
 			.as_ref()
 			.map(|folder| folder.order().to_vec())
 			.unwrap_or_default();
+		self.focus.set_order(self.focus.pane(), order.clone());
 		match command {
-			FocusCommand::First => self.focus.first(&order),
-			FocusCommand::Last => self.focus.last(&order),
+			FocusCommand::First => {
+				self.focus.first(&order);
+			}
+			FocusCommand::Last => {
+				self.focus.last(&order);
+			}
 			FocusCommand::Move(direction) => {
 				self.focus.set_columns(self.focus_columns());
 				self.focus.move_focus(direction, &order);
@@ -830,7 +835,9 @@ impl Engine {
 				let item = self.item_at(&path).map(|item| item.id);
 				self.focus.set(pane, item);
 			}
-			FocusCommand::Clear => self.focus.set(self.focus.pane(), None),
+			FocusCommand::Clear => {
+				self.focus.set(self.focus.pane(), None);
+			}
 			FocusCommand::Activate => {
 				return Outcome {
 					changes: ChangeSet::default(),
@@ -842,6 +849,9 @@ impl Engine {
 						.collect(),
 					job: None,
 				};
+			}
+			other => {
+				self.focus.apply(other);
 			}
 		}
 		Outcome {
@@ -901,6 +911,12 @@ impl Engine {
 				focus: plan.focus.clone(),
 			});
 		}
+		let order = self
+			.folder
+			.as_ref()
+			.map(|folder| folder.order().to_vec())
+			.unwrap_or_default();
+		self.focus.set_order(plan.pane, order);
 		let focus = plan
 			.focus
 			.as_deref()
