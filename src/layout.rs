@@ -1,7 +1,5 @@
 //! Slot and header placement for grid, list, grouped, and free layouts.
 
-use std::collections::HashMap;
-
 use crate::config::Config;
 use crate::item::Item;
 use crate::view::{FolderMode, GridSpec, HeaderSpec, Rect, SlotId, SlotSpec, ViewRequest};
@@ -106,7 +104,7 @@ fn grid_layout(
 
 	let grouped = config.group_mode != crate::view::GroupMode::None || config.show_stash;
 	if !grouped {
-		return plain_grid(grid, request, items);
+		return plain_grid(grid, items);
 	}
 
 	let stride = i32::from(grid.lines.max(1));
@@ -118,7 +116,7 @@ fn grid_layout(
 	}
 }
 
-fn plain_grid(grid: &GridSpec, request: &ViewRequest, items: &[Item]) -> FolderLayout {
+fn plain_grid(grid: &GridSpec, items: &[Item]) -> FolderLayout {
 	let lines = grid.lines.max(1) as usize;
 	let columns = if grid.horizontal {
 		items.len().div_ceil(lines)
@@ -275,14 +273,6 @@ fn free_layout(
 	let gap = grid.gap.max(0.0);
 	let item_width = grid.cell.width.max(1.0);
 	let item_height = grid.cell.height.max(1.0);
-	let item_main = if horizontal { item_height } else { item_width };
-	let view_main = if horizontal {
-		request.viewport.height
-	} else {
-		request.viewport.width
-	};
-	let auto_stride = (((view_main + gap) / (item_main + gap)).floor() as i32).max(1);
-
 	let mut min_columns = 1;
 	let mut min_rows = 1;
 	for item in items {
