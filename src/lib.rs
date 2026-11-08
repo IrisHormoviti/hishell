@@ -8,6 +8,7 @@ pub mod change;
 pub mod config;
 pub mod config_parser;
 pub mod engine;
+pub mod entry;
 pub mod error;
 pub mod folder;
 pub mod item;

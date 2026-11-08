@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use crate::entry::read_entry;
 use crate::item::{FsKind, IconRef, Item, ItemId, ItemKind};
 use crate::selection::Selection;
 
@@ -22,7 +23,7 @@ impl Folder {
 		if let Ok(entries) = std::fs::read_dir(path) {
 			items = entries
 				.flatten()
-				.map(|entry| {
+				.filter_map(|entry| {
 					let item_path = entry.path();
 					let file_type = entry.file_type().ok();
 					let metadata = entry.metadata().ok();
@@ -38,7 +39,7 @@ impl Folder {
 					};
 					let name = entry.file_name().to_string_lossy().into_owned();
 					let id = ItemId::for_path(&item_path);
-					Item {
+					let mut item = Item {
 						id,
 						name: name.clone(),
 						title: name.clone(),
@@ -76,7 +77,27 @@ impl Folder {
 							.and_then(|time| time.duration_since(UNIX_EPOCH).ok())
 							.map(|duration| duration.as_millis() as u64)
 							.unwrap_or(0),
+					};
+					if item.fs_kind == FsKind::File
+						&& let Some(entry) = read_entry(&item.path)
+					{
+						if entry.hidden {
+							return None;
+						}
+						if let Some(name) = entry.name {
+							item.title = name;
+						}
+						if let Some(comment) = entry.comment {
+							item.comment = comment;
+						}
+						if let Some(kind) = entry.kind {
+							item.kind = kind;
+						}
+						if let Some(icon) = entry.icon {
+							item.icon = resolve_icon(&item.path, &icon);
+						}
 					}
+					Some(item)
 				})
 				.collect();
 		}
@@ -168,6 +189,14 @@ impl Folder {
 
 fn directory_first(left: &Item, right: &Item) -> std::cmp::Ordering {
 	right.fs_kind.cmp(&left.fs_kind)
+}
+
+fn resolve_icon(path: &Path, icon: &str) -> IconRef {
+	if icon.contains('/') || icon.starts_with('.') {
+		let base = path.parent().unwrap_or(Path::new("."));
+		return IconRef::Path(base.join(icon));
+	}
+	IconRef::Theme(icon.to_string())
 }
 
 fn icon_for(kind: FsKind, mime: Option<&str>) -> IconRef {

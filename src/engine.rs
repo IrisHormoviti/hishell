@@ -569,6 +569,26 @@ mod tests {
 	}
 
 	#[test]
+	fn desktop_entries_apply_their_metadata() {
+		let path = temp_folder("entry");
+		std::fs::write(
+			path.join("ride.desktop"),
+			"[Desktop Entry]\nType=Application\nName=Ride\nIcon=ride\n",
+		)
+		.unwrap();
+		let engine = Engine::open(&path).unwrap();
+		let item = engine
+			.items()
+			.iter()
+			.find(|item| item.name == "ride.desktop")
+			.unwrap();
+		assert_eq!(item.title, "Ride");
+		assert_eq!(item.kind, crate::item::ItemKind::Application);
+		assert_eq!(item.icon, crate::item::IconRef::Theme(String::from("ride")));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
 	fn file_location_has_a_file_view() {
 		let path = temp_folder("file").join("photo.png");
 		std::fs::write(&path, b"not really a png").unwrap();
