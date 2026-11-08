@@ -233,6 +233,7 @@ impl Engine {
 					.config
 					.set(key, value)
 					.map_err(|error| Error::Config(error.message))?;
+				self.apply_config_change(delta.scope);
 				self.revision += 1;
 				ChangeSet {
 					config: vec![delta],
@@ -248,6 +249,7 @@ impl Engine {
 				let delta = self
 					.config
 					.set_raw(&self.location, &section, &key, &value, local)?;
+				self.apply_config_change(delta.scope);
 				self.revision += 1;
 				ChangeSet {
 					config: vec![delta],
@@ -388,6 +390,31 @@ impl Engine {
 			self.apply_runtime();
 		}
 		self.diagnostics = diagnostics;
+		self.rescan();
+		self.revision += 1;
+		ChangeSet {
+			location: Some(LocationDelta {
+				kind: Some(self.location.kind()),
+				path: Some(self.location.path().to_path_buf()),
+			}),
+			..ChangeSet::default()
+		}
+	}
+
+	fn apply_config_change(&mut self, scope: crate::change::ChangeScope) {
+		match scope {
+			crate::change::ChangeScope::Order => {
+				let sort = self.config.sort;
+				if let Some(folder) = self.folder.as_mut() {
+					folder.sort(sort);
+				}
+			}
+			crate::change::ChangeScope::Items => self.rescan(),
+			crate::change::ChangeScope::View | crate::change::ChangeScope::All => {}
+		}
+	}
+
+	fn rescan(&mut self) {
 		let previous_selection = self
 			.folder
 			.as_ref()
@@ -402,14 +429,6 @@ impl Engine {
 			self.folder = Some(scanned);
 		} else {
 			self.folder = None;
-		}
-		self.revision += 1;
-		ChangeSet {
-			location: Some(LocationDelta {
-				kind: Some(self.location.kind()),
-				path: Some(self.location.path().to_path_buf()),
-			}),
-			..ChangeSet::default()
 		}
 	}
 
@@ -585,6 +604,29 @@ mod tests {
 		assert_eq!(item.title, "Ride");
 		assert_eq!(item.kind, crate::item::ItemKind::Application);
 		assert_eq!(item.icon, crate::item::IconRef::Theme(String::from("ride")));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn config_change_updates_the_view() {
+		let path = temp_folder("config-view");
+		for index in 0..5 {
+			std::fs::write(path.join(format!("f{index}")), b"x").unwrap();
+		}
+		let mut engine = Engine::open(&path).unwrap();
+		engine
+			.dispatch(Command::SetConfig {
+				key: ConfigKey::Lines,
+				value: ConfigValue::Int(2),
+			})
+			.unwrap();
+		match engine.view(request()) {
+			ViewSpec::Folder(view) => match view.mode {
+				FolderMode::Grid(grid) => assert_eq!(grid.lines, 2),
+				FolderMode::List(_) => panic!("expected a grid"),
+			},
+			ViewSpec::File(_) => panic!("expected a folder view"),
+		}
 		std::fs::remove_dir_all(path).unwrap();
 	}
 
