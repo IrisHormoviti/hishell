@@ -1,9 +1,24 @@
 //! Action registry and availability.
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 use crate::config::LocationScope;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ActionId(pub &'static str);
+
+impl Serialize for ActionId {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.serialize_str(self.0)
+	}
+}
+
+impl<'de> Deserialize<'de> for ActionId {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let value = String::deserialize(deserializer)?;
+		Self::from_str(&value).ok_or_else(|| serde::de::Error::custom("unknown action"))
+	}
+}
 
 impl ActionId {
 	pub const OPEN: Self = Self("open");
@@ -115,6 +130,29 @@ impl ActionSubjects {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GroupId(pub &'static str);
 
+impl Serialize for GroupId {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.serialize_str(self.0)
+	}
+}
+
+impl<'de> Deserialize<'de> for GroupId {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let value = String::deserialize(deserializer)?;
+		Ok(Self(match value.as_str() {
+			"open" => "open",
+			"navigation" => "navigation",
+			"edit" => "edit",
+			"new" => "new",
+			"media" => "media",
+			"dangerous" => "dangerous",
+			"view" => "view",
+			"selection" => "selection",
+			_ => return Err(serde::de::Error::custom("unknown group")),
+		}))
+	}
+}
+
 impl GroupId {
 	pub const OPEN: Self = Self("open");
 	pub const NAVIGATION: Self = Self("navigation");
@@ -126,7 +164,7 @@ impl GroupId {
 	pub const SELECTION: Self = Self("selection");
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActionGroup {
 	pub id: GroupId,
 	pub order: i32,
@@ -151,7 +189,7 @@ pub enum DisabledReason {
 	Busy,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActionSpec {
 	pub id: ActionId,
 	pub group: ActionGroup,
@@ -451,4 +489,28 @@ pub fn descriptor(id: ActionId) -> Option<&'static ActionDescriptor> {
 
 pub fn menu_contains(descriptor: &ActionDescriptor, menu: MenuKind) -> bool {
 	descriptor.menus.contains(&menu) || descriptor.menus.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn actions_round_trip_through_json() {
+		let spec = ActionSpec {
+			id: ActionId::RENAME,
+			group: GROUP_EDIT,
+			subjects: ActionSubjects::FILE,
+			location: LocationScope::Both,
+			enabled: true,
+			visible: true,
+			checked: None,
+			disabled_reason: None,
+		};
+		let text = serde_json::to_string(&spec).unwrap();
+		let restored: ActionSpec = serde_json::from_str(&text).unwrap();
+		assert_eq!(restored, spec);
+		assert_eq!(ActionId::from_str("rename"), Some(ActionId::RENAME));
+		assert_eq!(ActionId::from_str("nope"), None);
+	}
 }
