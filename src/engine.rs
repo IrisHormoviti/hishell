@@ -1,17 +1,18 @@
 //! The engine facade: state, configuration, and view layout.
 
+use std::collections::HashMap;
 use std::path::Path;
 
-use crate::change::{ChangeSet, LocationDelta, SelectionDelta};
+use crate::change::{ChangeScope, ChangeSet, FolderDelta, LocationDelta, SelectionDelta};
 use crate::config::{Config, ConfigKey, ConfigLoad, ConfigValue};
 use crate::error::Error;
-use crate::folder::Folder;
+use crate::folder::{Folder, ScanOptions};
 use crate::item::{Item, ItemId};
 use crate::location::Location;
 use crate::selection::Selection;
 use crate::view::{
-	FocusSpec, FolderMode, FolderView, InteractionSpec, ListSpec, PaneId, Preview, Rect, SlotId,
-	SlotSpec, ViewRequest, ViewSpec, grid_spec,
+	FocusSpec, FolderMode, FolderView, InteractionSpec, ListSpec, PaneId, Preview, ViewRequest,
+	ViewSpec, grid_spec,
 };
 
 /// How much on-disk configuration the engine reads.
@@ -69,6 +70,19 @@ pub enum Command {
 	SelectAll,
 	ClearSelection,
 	SetSelectionActive(bool),
+	SetFreePosition {
+		name: String,
+		column: i32,
+		row: i32,
+	},
+	SetFreePositions {
+		positions: Vec<(String, i32, i32)>,
+	},
+	ResetFreePositions,
+	RenameFreePosition {
+		from: String,
+		to: String,
+	},
 }
 
 #[derive(Clone, Debug)]
@@ -100,6 +114,7 @@ pub struct Engine {
 	runtime: RuntimeSettings,
 	folder: Option<Folder>,
 	diagnostics: Vec<crate::config::ConfigDiagnostic>,
+	config_diagnostics: Vec<crate::config::ConfigDiagnostic>,
 	revision: u64,
 }
 
@@ -133,6 +148,7 @@ impl Engine {
 			runtime: options.runtime,
 			folder: None,
 			diagnostics: Vec::new(),
+			config_diagnostics: Vec::new(),
 			revision: 0,
 		};
 		engine.reload();
@@ -184,7 +200,8 @@ impl Engine {
 		match &self.location {
 			Location::Folder(_) => {
 				let mode = self.folder_mode(&request);
-				let slots = self.slots(&request, &mode);
+				let items = self.folder.as_ref().map(Folder::items).unwrap_or_default();
+				let layout = crate::layout::folder(&self.config, &request, &mode, items);
 				ViewSpec::Folder(FolderView {
 					revision: self.revision,
 					mode,
@@ -197,8 +214,8 @@ impl Engine {
 						mode: self.config.group_mode,
 						groups: self.config.groups.clone(),
 					},
-					slots,
-					headers: Vec::new(),
+					slots: layout.slots,
+					headers: layout.headers,
 					focus: FocusSpec {
 						pane: PaneId(0),
 						item: None,
@@ -233,10 +250,11 @@ impl Engine {
 					.config
 					.set(key, value)
 					.map_err(|error| Error::Config(error.message))?;
-				self.apply_config_change(delta.scope);
+				let folder = self.apply_config_change(delta.scope);
 				self.revision += 1;
 				ChangeSet {
 					config: vec![delta],
+					folder,
 					..ChangeSet::default()
 				}
 			}
@@ -249,10 +267,11 @@ impl Engine {
 				let delta = self
 					.config
 					.set_raw(&self.location, &section, &key, &value, local)?;
-				self.apply_config_change(delta.scope);
+				let folder = self.apply_config_change(delta.scope);
 				self.revision += 1;
 				ChangeSet {
 					config: vec![delta],
+					folder,
 					..ChangeSet::default()
 				}
 			}
@@ -277,6 +296,33 @@ impl Engine {
 			Command::SetSelectionActive(active) => {
 				self.selection_changes(|selection, _| selection.set_active(active))
 			}
+			Command::SetFreePosition { name, column, row } => {
+				let mut positions = self.config.free_placement_positions.clone();
+				positions.insert(name, (column, row));
+				self.free_positions_changes(positions)?
+			}
+			Command::SetFreePositions { positions } => {
+				let mut merged = self.config.free_placement_positions.clone();
+				for (name, column, row) in &positions {
+					merged.retain(|existing, value| {
+						existing == name || value.0 != *column || value.1 != *row
+					});
+				}
+				for (name, column, row) in positions {
+					merged.insert(name, (column, row));
+				}
+				self.free_positions_changes(merged)?
+			}
+			Command::ResetFreePositions => self.free_positions_changes(HashMap::new())?,
+			Command::RenameFreePosition { from, to } => {
+				let mut positions = self.config.free_placement_positions.clone();
+				if let Some(position) = positions.remove(&from) {
+					positions.insert(to, position);
+					self.free_positions_changes(positions)?
+				} else {
+					ChangeSet::default()
+				}
+			}
 		};
 		Ok(Outcome {
 			changes,
@@ -289,6 +335,13 @@ impl Engine {
 		TickResult::default()
 	}
 
+	/// Whether the current folder's `[Radio]` group accepts `path` as a choice.
+	pub fn is_radio_member(&self, path: &Path) -> bool {
+		self.folder
+			.as_ref()
+			.is_some_and(|folder| folder.is_radio_member(path, &self.config))
+	}
+
 	fn folder_mode(&self, request: &ViewRequest) -> FolderMode {
 		match self.config.view_mode {
 			crate::view::ViewMode::Grid => FolderMode::Grid(grid_spec(&self.config, request)),
@@ -296,66 +349,6 @@ impl Engine {
 				columns: self.config.list_columns.clone(),
 				header: self.config.list_header,
 			}),
-		}
-	}
-
-	fn slots(&self, request: &ViewRequest, mode: &FolderMode) -> Vec<SlotSpec> {
-		let Some(folder) = &self.folder else {
-			return Vec::new();
-		};
-		let items = folder.items();
-		match mode {
-			FolderMode::Grid(grid) => {
-				if items.is_empty() {
-					return Vec::new();
-				}
-				let lines = grid.lines.max(1) as usize;
-				let columns = if grid.horizontal {
-					items.len().div_ceil(lines)
-				} else {
-					lines
-				};
-				items
-					.iter()
-					.enumerate()
-					.map(|(index, item)| {
-						let (column, row) = if grid.horizontal {
-							(index / lines, index % lines)
-						} else {
-							(index % columns, index / columns)
-						};
-						SlotSpec {
-							id: SlotId(item.id.get()),
-							item: item.id,
-							cell: (column as u32, row as u32),
-							rect: Rect {
-								x: column as f64 * (grid.cell.width + grid.gap),
-								y: row as f64 * (grid.cell.height + grid.gap),
-								width: grid.cell.width,
-								height: grid.cell.height,
-							},
-						}
-					})
-					.collect()
-			}
-			FolderMode::List(_) => {
-				let height = request.metrics.label_height.max(16.0) + 12.0;
-				items
-					.iter()
-					.enumerate()
-					.map(|(index, item)| SlotSpec {
-						id: SlotId(item.id.get()),
-						item: item.id,
-						cell: (0, index as u32),
-						rect: Rect {
-							x: 0.0,
-							y: index as f64 * height,
-							width: request.viewport.width,
-							height,
-						},
-					})
-					.collect()
-			}
 		}
 	}
 
@@ -376,23 +369,23 @@ impl Engine {
 	}
 
 	fn reload(&mut self) -> ChangeSet {
-		let diagnostics;
 		if self.mode == Mode::Raw {
 			self.config = raw_config(&self.runtime);
-			diagnostics = Vec::new();
+			self.config_diagnostics.clear();
 		} else {
 			let ConfigLoad {
 				config,
-				diagnostics: load_diagnostics,
+				diagnostics,
 			} = Config::load_for(&self.location);
 			self.config = config;
-			diagnostics = load_diagnostics;
+			self.config_diagnostics = diagnostics;
 			self.apply_runtime();
 		}
-		self.diagnostics = diagnostics;
 		self.rescan();
+		self.rebuild_diagnostics();
 		self.revision += 1;
 		ChangeSet {
+			folder: FolderDelta::Reset,
 			location: Some(LocationDelta {
 				kind: Some(self.location.kind()),
 				path: Some(self.location.path().to_path_buf()),
@@ -401,16 +394,21 @@ impl Engine {
 		}
 	}
 
-	fn apply_config_change(&mut self, scope: crate::change::ChangeScope) {
+	fn apply_config_change(&mut self, scope: ChangeScope) -> FolderDelta {
 		match scope {
-			crate::change::ChangeScope::Order => {
-				let sort = self.config.sort;
+			ChangeScope::Order => {
 				if let Some(folder) = self.folder.as_mut() {
-					folder.sort(sort);
+					let config = &self.config;
+					folder.apply_config(config);
 				}
+				self.order_delta()
 			}
-			crate::change::ChangeScope::Items => self.rescan(),
-			crate::change::ChangeScope::View | crate::change::ChangeScope::All => {}
+			ChangeScope::Items => {
+				self.rescan();
+				self.rebuild_diagnostics();
+				FolderDelta::Reset
+			}
+			ChangeScope::View | ChangeScope::All => self.order_delta(),
 		}
 	}
 
@@ -420,8 +418,15 @@ impl Engine {
 			.as_ref()
 			.map(|folder| folder.selection().clone());
 		if let Location::Folder(folder) = &self.location {
-			let mut scanned = Folder::scan(folder.path());
-			scanned.sort(self.config.sort);
+			let include_hidden = !self.config.stash_dotfiles || self.config.show_stash;
+			let mut scanned = Folder::scan_with(
+				folder.path(),
+				ScanOptions {
+					read_entries: self.mode == Mode::Config,
+					include_hidden,
+				},
+			);
+			scanned.apply_config(&self.config);
 			if let Some(selection) = previous_selection {
 				*scanned.selection_mut() = selection;
 			}
@@ -430,6 +435,53 @@ impl Engine {
 		} else {
 			self.folder = None;
 		}
+	}
+
+	fn rebuild_diagnostics(&mut self) {
+		self.diagnostics = self.config_diagnostics.clone();
+		if let Some(folder) = &self.folder {
+			self.diagnostics
+				.extend(folder.diagnostics().iter().cloned());
+		}
+	}
+
+	fn order_delta(&self) -> FolderDelta {
+		match &self.folder {
+			Some(folder) => FolderDelta::Items {
+				added: Vec::new(),
+				removed: Vec::new(),
+				updated: Vec::new(),
+				order: folder.order().to_vec(),
+			},
+			None => FolderDelta::Reset,
+		}
+	}
+
+	fn free_positions_changes(
+		&mut self,
+		positions: HashMap<String, (i32, i32)>,
+	) -> Result<ChangeSet, Error> {
+		let json = serde_json::to_string(&positions).unwrap_or_else(|_| String::from("{}"));
+		let delta = if self.mode == Mode::Config {
+			self.config.set_raw(
+				&self.location,
+				"Folder View",
+				"FreePlacementPositions",
+				&json,
+				true,
+			)?
+		} else {
+			self.config
+				.set(ConfigKey::FreePlacementPositions, ConfigValue::Json(json))
+				.map_err(|error| Error::Config(error.message))?
+		};
+		self.apply_config_change(delta.scope);
+		self.revision += 1;
+		Ok(ChangeSet {
+			config: vec![delta],
+			folder: self.order_delta(),
+			..ChangeSet::default()
+		})
 	}
 
 	fn apply_runtime(&mut self) {
@@ -485,6 +537,19 @@ impl std::fmt::Debug for Engine {
 mod tests {
 	use super::*;
 	use crate::config::ConfigKey;
+
+	trait FolderSlots {
+		fn folder_slots(self) -> Vec<crate::view::SlotSpec>;
+	}
+
+	impl FolderSlots for ViewSpec {
+		fn folder_slots(self) -> Vec<crate::view::SlotSpec> {
+			match self {
+				ViewSpec::Folder(view) => view.slots,
+				ViewSpec::File(_) => Vec::new(),
+			}
+		}
+	}
 
 	fn temp_folder(name: &str) -> std::path::PathBuf {
 		let path =
@@ -653,6 +718,192 @@ mod tests {
 		assert_eq!(items[0].name, "a-dir");
 		assert!(engine.item_at(&path.join("b.txt")).is_some());
 		assert!(engine.item(items[0].id).is_some());
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn a_folder_entry_can_make_the_folder_an_application() {
+		let path = temp_folder("folder-entry");
+		let folder = path.join("ride");
+		std::fs::create_dir_all(&folder).unwrap();
+		std::fs::write(
+			folder.join(".directory"),
+			"[Desktop Entry]\nType=Application\nName=Ride\n",
+		)
+		.unwrap();
+		let engine = Engine::open(&path).unwrap();
+		let item = engine.item_at(&folder).unwrap();
+		assert_eq!(item.title, "Ride");
+		assert_eq!(item.kind, crate::item::ItemKind::Application);
+		assert_eq!(item.fs_kind, crate::item::FsKind::Directory);
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn file_descriptors_attach_their_metadata_to_the_target() {
+		let path = temp_folder("descriptor");
+		let file = path.join("game.rom");
+		std::fs::write(&file, b"rom").unwrap();
+		std::fs::write(
+			path.join("game.desktop"),
+			format!(
+				"[Desktop Entry]\nType=File\nPath={}\nName=Test Game\nComment=Fun\n",
+				file.display()
+			),
+		)
+		.unwrap();
+		let engine = Engine::open(&path).unwrap();
+		assert_eq!(engine.items().len(), 1);
+		let item = engine.item_at(&file).unwrap();
+		assert_eq!(item.title, "Test Game");
+		assert_eq!(item.comment, "Fun");
+		assert_eq!(
+			item.entry_path.as_deref(),
+			Some(path.join("game.desktop").as_path())
+		);
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn sidecars_attach_to_the_file_beside_them() {
+		let path = temp_folder("sidecar");
+		let file = path.join("photo.png");
+		std::fs::write(&file, b"png").unwrap();
+		std::fs::write(
+			path.join("photo.png.desktop"),
+			"[Desktop Entry]\nType=File\nName=Holiday\n",
+		)
+		.unwrap();
+		let engine = Engine::open(&path).unwrap();
+		assert_eq!(engine.items().len(), 1);
+		assert_eq!(engine.item_at(&file).unwrap().title, "Holiday");
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn raw_mode_ignores_entries() {
+		let path = temp_folder("raw-entry");
+		let folder = path.join("ride");
+		std::fs::create_dir_all(&folder).unwrap();
+		std::fs::write(
+			folder.join(".directory"),
+			"[Desktop Entry]\nType=Application\nName=Ride\n",
+		)
+		.unwrap();
+		std::fs::write(
+			path.join("app.desktop"),
+			"[Desktop Entry]\nType=Application\nName=App\n",
+		)
+		.unwrap();
+		let engine = Engine::open_location_with(
+			Location::folder(&path),
+			OpenOptions {
+				mode: Mode::Raw,
+				..OpenOptions::default()
+			},
+		)
+		.unwrap();
+		assert_eq!(
+			engine.item_at(&folder).unwrap().kind,
+			crate::item::ItemKind::Directory
+		);
+		let desktop = engine.item_at(&path.join("app.desktop")).unwrap();
+		assert_eq!(desktop.kind, crate::item::ItemKind::File);
+		assert_eq!(desktop.title, "app.desktop");
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn grouping_reorders_items_and_labels_them() {
+		let path = temp_folder("group");
+		std::fs::write(path.join("a.png"), b"x").unwrap();
+		std::fs::write(path.join("b.zip"), b"x").unwrap();
+		std::fs::write(path.join("c.txt"), b"x").unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		engine
+			.dispatch(Command::SetConfig {
+				key: ConfigKey::Group,
+				value: ConfigValue::Str("TYPE".into()),
+			})
+			.unwrap();
+		let labels: Vec<&str> = engine
+			.items()
+			.iter()
+			.map(|item| item.group_label.as_str())
+			.collect();
+		assert_eq!(labels, ["Images", "Documents", "Archives"]);
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn stashed_dotfiles_appear_only_when_requested() {
+		let path = temp_folder("stash");
+		std::fs::write(path.join("visible.txt"), b"x").unwrap();
+		std::fs::write(path.join(".hidden"), b"x").unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		assert_eq!(engine.items().len(), 1);
+		engine
+			.dispatch(Command::SetConfig {
+				key: ConfigKey::ShowStash,
+				value: ConfigValue::Bool(true),
+			})
+			.unwrap();
+		assert_eq!(engine.items().len(), 2);
+		let stashed = engine.items().iter().find(|item| item.is_stashed).unwrap();
+		assert_eq!(stashed.group_label, "Stash");
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn free_positions_place_items_in_their_cell() {
+		let path = temp_folder("free");
+		std::fs::write(path.join("a"), b"x").unwrap();
+		std::fs::write(path.join("b"), b"x").unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		engine
+			.dispatch(Command::SetConfig {
+				key: ConfigKey::Sort,
+				value: ConfigValue::Str("FREE".into()),
+			})
+			.unwrap();
+		engine
+			.dispatch(Command::SetFreePosition {
+				name: String::from("b"),
+				column: 1,
+				row: 0,
+			})
+			.unwrap();
+		let placed = engine
+			.view(request())
+			.folder_slots()
+			.into_iter()
+			.find(|slot| engine.item(slot.item).is_some_and(|item| item.name == "b"))
+			.unwrap();
+		assert_eq!(placed.cell, (1, 0));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn radio_membership_follows_the_folder_config() {
+		let path = temp_folder("radio");
+		std::fs::write(path.join("one"), b"x").unwrap();
+		let other = path.join("folder");
+		std::fs::create_dir_all(&other).unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		engine
+			.dispatch(Command::SetConfig {
+				key: ConfigKey::RadioEnabled,
+				value: ConfigValue::Bool(true),
+			})
+			.unwrap();
+		engine
+			.dispatch(Command::SetConfig {
+				key: ConfigKey::RadioOnly,
+				value: ConfigValue::Str("FILES".into()),
+			})
+			.unwrap();
+		assert!(engine.is_radio_member(&path.join("one")));
+		assert!(!engine.is_radio_member(&other));
 		std::fs::remove_dir_all(path).unwrap();
 	}
 

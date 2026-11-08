@@ -11,8 +11,10 @@ pub mod engine;
 pub mod entry;
 pub mod error;
 pub mod folder;
+pub mod group;
 pub mod icon;
 pub mod item;
+pub mod layout;
 pub mod location;
 pub mod path;
 pub mod selection;
@@ -26,7 +28,9 @@ pub use engine::{
 	Command, Deps, Effect, Engine, JobHandle, Mode, OpenOptions, Outcome, RuntimeSettings,
 	TickResult,
 };
+pub use entry::{Entry, EntryType};
 pub use error::Error;
+pub use folder::ScanOptions;
 pub use item::{FsKind, IconRef, Item, ItemId, ItemKind};
 pub use location::{File, Folder, Location, LocationKind};
 pub use selection::{Selection, SelectionStatus};

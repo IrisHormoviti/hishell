@@ -361,7 +361,9 @@ impl ListColumn {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CustomGroup {
+	#[serde(alias = "Name")]
 	pub name: String,
+	#[serde(alias = "Files")]
 	pub files: Vec<String>,
 }
 
@@ -450,10 +452,13 @@ pub struct SlotSpec {
 	pub rect: Rect,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct HeaderSpec {
 	pub title: String,
 	pub item: Option<ItemId>,
+	pub group: u16,
+	pub cell: (u32, u32),
+	pub rect: Rect,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

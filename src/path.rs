@@ -1,6 +1,17 @@
 //! Lexical path helpers and navigation plans.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Resolve a leading `~/` against the home folder, leaving other paths alone.
+pub fn expand_home(value: &str) -> PathBuf {
+	let Some(rest) = value.strip_prefix("~/") else {
+		return PathBuf::from(value);
+	};
+	match dirs::home_dir() {
+		Some(home) => home.join(rest),
+		None => PathBuf::from(value),
+	}
+}
 
 /// Path components without the root, joined by newlines for the location bar.
 pub fn segments(path: &str) -> String {
