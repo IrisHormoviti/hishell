@@ -9,7 +9,7 @@ use crate::config::{Config, ConfigKey, ConfigLoad, ConfigValue};
 use crate::error::Error;
 use crate::folder::{Folder, ScanOptions};
 use crate::item::{Item, ItemId};
-use crate::jobs::JobHandle;
+use crate::jobs::{JobEvent, JobHandle, Jobs};
 use crate::location::Location;
 use crate::navigation::{NavigationPlan, NavigationRequest, PathRelation, SlotAnchor, relation};
 use crate::selection::Selection;
@@ -88,6 +88,8 @@ pub enum Command {
 	},
 	Navigate(NavigationRequest),
 	GoUp,
+	Run(crate::ops::Op),
+	CancelJob(JobHandle),
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +97,7 @@ pub enum Command {
 pub enum Effect {
 	Reload(Vec<PathBuf>),
 	Navigate(NavigationPlan),
+	Job(JobEvent),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -120,6 +123,7 @@ pub struct Engine {
 	config_diagnostics: Vec<crate::config::ConfigDiagnostic>,
 	revision: u64,
 	last_view: RefCell<Option<FolderView>>,
+	jobs: Jobs,
 }
 
 impl Engine {
@@ -155,6 +159,7 @@ impl Engine {
 			config_diagnostics: Vec::new(),
 			revision: 0,
 			last_view: RefCell::new(None),
+			jobs: Jobs::default(),
 		};
 		engine.reload();
 		Ok(engine)
@@ -387,6 +392,22 @@ impl Engine {
 				let plan = self.navigation_plan(&request);
 				return Ok(self.navigate(plan));
 			}
+			Command::Run(op) => {
+				let job = self.jobs.submit(op);
+				return Ok(Outcome {
+					changes: ChangeSet::default(),
+					effects: Vec::new(),
+					job: Some(job),
+				});
+			}
+			Command::CancelJob(handle) => {
+				handle.cancel();
+				return Ok(Outcome {
+					changes: ChangeSet::default(),
+					effects: Vec::new(),
+					job: Some(handle),
+				});
+			}
 		};
 		Ok(Outcome {
 			changes,
@@ -396,7 +417,10 @@ impl Engine {
 	}
 
 	pub fn tick(&mut self) -> TickResult {
-		TickResult::default()
+		TickResult {
+			changes: ChangeSet::default(),
+			effects: self.jobs.drain().into_iter().map(Effect::Job).collect(),
+		}
 	}
 
 	/// Whether the current folder's `[Radio]` group accepts `path` as a choice.
@@ -1008,7 +1032,7 @@ mod tests {
 				assert_eq!(plan.to, child);
 				assert_eq!(plan.from, path);
 			}
-			Effect::Reload(_) => panic!("expected a navigation plan"),
+			Effect::Reload(_) | Effect::Job(_) => panic!("expected a navigation plan"),
 		}
 		std::fs::remove_dir_all(path).unwrap();
 	}
@@ -1025,6 +1049,36 @@ mod tests {
 		assert!(engine.anchor_for(PaneId(0), &child).is_some());
 		assert!(engine.anchor_for(PaneId(0), &nested).is_none());
 		assert!(engine.closest_visible_parent(PaneId(0), &nested).is_some());
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn jobs_run_through_the_engine_and_report_on_tick() {
+		let path = temp_folder("jobs");
+		let file = path.join("a.txt");
+		std::fs::write(&file, b"x").unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		let outcome = engine
+			.dispatch(Command::Run(crate::ops::Op::Delete {
+				paths: vec![file.clone()],
+			}))
+			.unwrap();
+		assert!(outcome.job.is_some());
+		let mut finished = false;
+		for _ in 0..200 {
+			for effect in engine.tick().effects {
+				if let Effect::Job(crate::jobs::JobEvent::Finished { outcome, .. }) = effect {
+					assert!(outcome.failed.is_empty());
+					finished = true;
+				}
+			}
+			if finished {
+				break;
+			}
+			std::thread::sleep(std::time::Duration::from_millis(10));
+		}
+		assert!(finished);
+		assert!(!file.exists());
 		std::fs::remove_dir_all(path).unwrap();
 	}
 
