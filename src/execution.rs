@@ -265,8 +265,25 @@ impl Execution {
 		self.screen = screen;
 	}
 
+	pub fn screen(&self) -> Option<&str> {
+		self.screen.as_deref()
+	}
+
 	pub fn request(&mut self, request: LaunchRequest) -> Result<LaunchOutcome, LaunchError> {
 		let request = self.spawn_request(request)?;
+		self.request_spawn(request)
+	}
+
+	/// Ask to start an already-resolved program. The wrapper, preflight,
+	/// screen, and launch marker are the same as for an entry launch, so a
+	/// frontend with its own command line does not reimplement them.
+	pub fn request_spawn(
+		&mut self,
+		mut request: SpawnRequest,
+	) -> Result<LaunchOutcome, LaunchError> {
+		if request.screen.is_none() {
+			request.screen = self.screen.clone();
+		}
 		let wrapper = self.usable_wrapper();
 		if request.through_wrapper
 			&& let Some(wrapper) = wrapper.as_deref()
