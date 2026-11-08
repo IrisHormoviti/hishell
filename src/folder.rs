@@ -126,8 +126,28 @@ impl Folder {
 					.or_else(|| crate::icon::mime_for_path(&raw.path)),
 				FsKind::Directory => None,
 			};
+			let descriptor = entry
+				.is_none()
+				.then(|| crate::descriptor::lookup(&raw.path))
+				.flatten();
+			let appimage = (raw.fs_kind == FsKind::File
+				&& entry.is_none()
+				&& crate::appimage::is_appimage(&raw.path))
+			.then(|| crate::appimage::entry(&raw.path))
+			.flatten();
 			let icon = entry
 				.and_then(Entry::icon_ref)
+				.or_else(|| {
+					descriptor
+						.as_ref()
+						.and_then(crate::descriptor::Descriptor::icon_ref)
+				})
+				.or_else(|| {
+					appimage
+						.as_ref()
+						.and_then(|entry| entry.icon.clone())
+						.map(IconRef::Path)
+				})
 				.unwrap_or_else(|| match raw.fs_kind {
 					FsKind::Directory => IconRef::Theme(String::from("folder")),
 					FsKind::File => crate::icon::for_mime(mime.as_deref().unwrap_or_default()),
@@ -139,9 +159,13 @@ impl Folder {
 				name: name.clone(),
 				title: entry
 					.and_then(|entry| entry.name.clone())
+					.or_else(|| descriptor.as_ref().and_then(|entry| entry.name.clone()))
+					.or_else(|| appimage.as_ref().and_then(|entry| entry.name.clone()))
 					.unwrap_or_else(|| name.clone()),
 				comment: entry
 					.and_then(|entry| entry.comment.clone())
+					.or_else(|| descriptor.as_ref().and_then(|entry| entry.comment.clone()))
+					.or_else(|| appimage.as_ref().and_then(|entry| entry.comment.clone()))
 					.unwrap_or_default(),
 				path: raw.path.clone(),
 				entry_path: entry.map(|entry| entry.path.clone()),

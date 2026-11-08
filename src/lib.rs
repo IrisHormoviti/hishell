@@ -5,9 +5,11 @@
 //! frontends depend on it and render the state it produces.
 
 pub mod action;
+pub mod appimage;
 pub mod change;
 pub mod config;
 pub mod config_parser;
+pub mod descriptor;
 pub mod engine;
 pub mod entry;
 pub mod error;
@@ -37,8 +39,10 @@ pub use action::{
 	ActionDescriptor, ActionGroup, ActionId, ActionRequest, ActionSpec, ActionSubjects,
 	DisabledReason, GroupId, MenuKind, Target,
 };
+pub use appimage::AppImageEntry;
 pub use change::{ChangeScope, ChangeSet, FolderDelta};
 pub use config::{Config, ConfigDelta, ConfigDiagnostic, ConfigKey, ConfigLoad, LocationScope};
+pub use descriptor::Descriptor;
 pub use engine::{
 	Command, Deps, Effect, Engine, Mode, OpenOptions, Outcome, RuntimeSettings, TickResult,
 };
