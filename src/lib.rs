@@ -11,6 +11,7 @@ pub mod engine;
 pub mod entry;
 pub mod error;
 pub mod folder;
+pub mod icon;
 pub mod item;
 pub mod location;
 pub mod path;

@@ -39,6 +39,11 @@ impl Folder {
 					};
 					let name = entry.file_name().to_string_lossy().into_owned();
 					let id = ItemId::for_path(&item_path);
+					let mime = if fs_kind == FsKind::File {
+						crate::icon::mime_for_path(&item_path)
+					} else {
+						None
+					};
 					let mut item = Item {
 						id,
 						name: name.clone(),
@@ -47,12 +52,12 @@ impl Folder {
 						path: item_path,
 						fs_kind,
 						kind: ItemKind::from_fs(fs_kind),
-						mime: if fs_kind == FsKind::File {
-							mime_for(&entry.path())
+						mime: mime.clone(),
+						icon: if fs_kind == FsKind::Directory {
+							IconRef::Theme(String::from("folder"))
 						} else {
-							None
+							crate::icon::for_mime(mime.as_deref().unwrap_or_default())
 						},
-						icon: icon_for(fs_kind, mime_for(&entry.path()).as_deref()),
 						is_symlink,
 						is_dotfile: name.starts_with('.'),
 						size: metadata
@@ -197,36 +202,4 @@ fn resolve_icon(path: &Path, icon: &str) -> IconRef {
 		return IconRef::Path(base.join(icon));
 	}
 	IconRef::Theme(icon.to_string())
-}
-
-fn icon_for(kind: FsKind, mime: Option<&str>) -> IconRef {
-	if kind == FsKind::Directory {
-		return IconRef::Theme(String::from("folder"));
-	}
-	let name = match mime.unwrap_or_default() {
-		mime if mime.starts_with("image/") => "image-x-generic",
-		mime if mime.starts_with("audio/") => "audio-x-generic",
-		mime if mime.starts_with("video/") => "video-x-generic",
-		"application/pdf" => "application-pdf",
-		"application/zip"
-		| "application/x-tar"
-		| "application/x-compressed-tar"
-		| "application/gzip"
-		| "application/x-7z-compressed"
-		| "application/x-rar" => "package-x-generic",
-		"application/x-executable" | "application/x-sharedlib" => "application-x-executable",
-		"text/html" | "text/xml" | "application/json" => "text-html",
-		_ => "text-x-generic",
-	};
-	IconRef::Theme(String::from(name))
-}
-
-fn mime_for(path: &Path) -> Option<String> {
-	path.extension()
-		.and_then(|extension| extension.to_str())
-		.map(|extension| {
-			mime_guess::from_ext(extension)
-				.first_or_octet_stream()
-				.to_string()
-		})
 }
