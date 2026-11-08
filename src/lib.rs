@@ -29,6 +29,7 @@ pub mod prompt;
 pub mod selection;
 pub mod session;
 pub mod squashfs;
+pub mod thumbnail;
 pub mod value;
 pub mod view;
 
@@ -68,6 +69,7 @@ pub use platform::{
 pub use prompt::{FrontendRequest, Notice, Prompt};
 pub use selection::{Selection, SelectionStatus};
 pub use session::{SCHEMA_VERSION, SessionData, SessionStore};
+pub use thumbnail::FreeDesktopThumbnailer;
 pub use value::ConfigValue;
 pub use view::{
 	FileView, FolderMode, FolderView, GridMode, GridSizing, GridSpec, Metrics, PaneId, ViewRequest,

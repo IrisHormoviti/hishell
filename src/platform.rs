@@ -106,6 +106,7 @@ impl Platform {
 		Self {
 			mime: Some(Arc::new(FreeDesktopMime)),
 			apps: Some(Arc::new(FreeDesktopApps)),
+			thumbnails: Some(Arc::new(crate::thumbnail::FreeDesktopThumbnailer)),
 			..Self::default()
 		}
 	}
