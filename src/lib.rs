@@ -70,7 +70,7 @@ pub use selection::{Selection, SelectionStatus};
 pub use session::{SCHEMA_VERSION, SessionData, SessionStore};
 pub use value::ConfigValue;
 pub use view::{
-	FileView, FolderMode, FolderView, GridMode, GridSizing, GridSpec, Metrics, ViewRequest,
+	FileView, FolderMode, FolderView, GridMode, GridSizing, GridSpec, Metrics, PaneId, ViewRequest,
 	ViewSpec, Viewport,
 };
 
