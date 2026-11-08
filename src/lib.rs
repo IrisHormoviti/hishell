@@ -13,6 +13,7 @@ pub mod folder;
 pub mod item;
 pub mod location;
 pub mod path;
+pub mod selection;
 pub mod squashfs;
 pub mod value;
 pub mod view;
@@ -26,6 +27,7 @@ pub use engine::{
 pub use error::Error;
 pub use item::{FsKind, IconRef, Item, ItemId, ItemKind};
 pub use location::{File, Folder, Location, LocationKind};
+pub use selection::{Selection, SelectionStatus};
 pub use value::ConfigValue;
 pub use view::{
 	FileView, FolderMode, FolderView, GridMode, GridSizing, GridSpec, Metrics, ViewRequest,
@@ -41,6 +43,7 @@ pub mod prelude {
 	pub use crate::error::Error;
 	pub use crate::item::{FsKind, IconRef, Item, ItemId, ItemKind};
 	pub use crate::location::{File, Folder, Location, LocationKind};
+	pub use crate::selection::{Selection, SelectionStatus};
 	pub use crate::value::ConfigValue;
 	pub use crate::view::{
 		FolderMode, FolderView, GridMode, GridSizing, GridSpec, ViewRequest, ViewSpec,

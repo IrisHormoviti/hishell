@@ -13,6 +13,17 @@ impl ItemId {
 		Self(raw)
 	}
 
+	/// Derive the identity from the item's path, so an id survives a rescan
+	/// while the path remains in the folder.
+	pub fn for_path(path: &std::path::Path) -> Self {
+		let mut hash = 0xcbf2_9ce4_8422_2325u64;
+		for byte in path.as_os_str().as_encoded_bytes() {
+			hash ^= *byte as u64;
+			hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+		}
+		Self(hash)
+	}
+
 	pub fn get(self) -> u64 {
 		self.0
 	}

@@ -5,18 +5,19 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::item::{FsKind, IconRef, Item, ItemId, ItemKind};
+use crate::selection::Selection;
 
 pub struct Folder {
 	path: PathBuf,
 	items: Vec<Item>,
 	by_path: HashMap<PathBuf, ItemId>,
 	order: Vec<ItemId>,
+	selection: Selection,
 }
 
 impl Folder {
 	pub fn scan(path: &Path) -> Self {
 		let mut items = Vec::new();
-		let mut next_id = 0u64;
 
 		if let Ok(entries) = std::fs::read_dir(path) {
 			items = entries
@@ -36,8 +37,7 @@ impl Folder {
 						FsKind::File
 					};
 					let name = entry.file_name().to_string_lossy().into_owned();
-					let id = ItemId::new(next_id);
-					next_id += 1;
+					let id = ItemId::for_path(&item_path);
 					Item {
 						id,
 						name: name.clone(),
@@ -100,6 +100,7 @@ impl Folder {
 			items,
 			by_path,
 			order,
+			selection: Selection::default(),
 		}
 	}
 
@@ -152,6 +153,19 @@ impl Folder {
 			}
 		}
 		self.order = self.items.iter().map(|item| item.id).collect();
+		self.selection.reorder(&self.order);
+	}
+
+	pub fn selection(&self) -> &Selection {
+		&self.selection
+	}
+
+	pub fn selection_mut(&mut self) -> &mut Selection {
+		&mut self.selection
+	}
+
+	pub fn retain_selection(&mut self) {
+		self.selection.retain(&self.order);
 	}
 }
 

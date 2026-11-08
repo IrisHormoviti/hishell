@@ -2,12 +2,13 @@
 
 use std::path::Path;
 
-use crate::change::{ChangeSet, LocationDelta};
+use crate::change::{ChangeSet, LocationDelta, SelectionDelta};
 use crate::config::{Config, ConfigKey, ConfigLoad, ConfigValue};
 use crate::error::Error;
 use crate::folder::Folder;
 use crate::item::{Item, ItemId};
 use crate::location::Location;
+use crate::selection::Selection;
 use crate::view::{
 	FocusSpec, FolderMode, FolderView, InteractionSpec, ListSpec, PaneId, Preview, Rect, SlotId,
 	SlotSpec, ViewRequest, ViewSpec, grid_spec,
@@ -62,6 +63,12 @@ pub enum Command {
 	},
 	Reload,
 	SetMode(Mode),
+	SelectOnly(ItemId),
+	ToggleSelection(ItemId),
+	SelectRange(ItemId),
+	SelectAll,
+	ClearSelection,
+	SetSelectionActive(bool),
 }
 
 #[derive(Clone, Debug)]
@@ -163,6 +170,10 @@ impl Engine {
 		&self.diagnostics
 	}
 
+	pub fn selection(&self) -> Option<&Selection> {
+		self.folder.as_ref().map(|folder| folder.selection())
+	}
+
 	pub fn view(&self, request: ViewRequest) -> ViewSpec {
 		let interaction = InteractionSpec {
 			open_on_click: self.config.open_on_click,
@@ -248,6 +259,22 @@ impl Engine {
 				self.mode = mode;
 				self.reload()
 			}
+			Command::SelectOnly(id) => {
+				self.selection_changes(|selection, _| selection.select_only(id))
+			}
+			Command::ToggleSelection(id) => {
+				self.selection_changes(|selection, _| selection.toggle(id))
+			}
+			Command::SelectRange(id) => {
+				self.selection_changes(|selection, order| selection.range_to(order, id))
+			}
+			Command::SelectAll => {
+				self.selection_changes(|selection, order| selection.select_all(order))
+			}
+			Command::ClearSelection => self.selection_changes(|selection, _| selection.clear()),
+			Command::SetSelectionActive(active) => {
+				self.selection_changes(|selection, _| selection.set_active(active))
+			}
 		};
 		Ok(Outcome {
 			changes,
@@ -330,6 +357,22 @@ impl Engine {
 		}
 	}
 
+	fn selection_changes(&mut self, change: impl FnOnce(&mut Selection, &[ItemId])) -> ChangeSet {
+		let Some(folder) = self.folder.as_mut() else {
+			return ChangeSet::default();
+		};
+		let order = folder.order().to_vec();
+		change(folder.selection_mut(), &order);
+		let selection = folder.selection();
+		ChangeSet {
+			selection: Some(SelectionDelta {
+				active: selection.active(),
+				selected: selection.items().to_vec(),
+			}),
+			..ChangeSet::default()
+		}
+	}
+
 	fn reload(&mut self) -> ChangeSet {
 		let diagnostics;
 		if self.mode == Mode::Raw {
@@ -345,9 +388,17 @@ impl Engine {
 			self.apply_runtime();
 		}
 		self.diagnostics = diagnostics;
+		let previous_selection = self
+			.folder
+			.as_ref()
+			.map(|folder| folder.selection().clone());
 		if let Location::Folder(folder) = &self.location {
 			let mut scanned = Folder::scan(folder.path());
 			scanned.sort(self.config.sort);
+			if let Some(selection) = previous_selection {
+				*scanned.selection_mut() = selection;
+			}
+			scanned.retain_selection();
 			self.folder = Some(scanned);
 		} else {
 			self.folder = None;
@@ -486,6 +537,34 @@ mod tests {
 		assert_eq!(engine.config().lines, 4);
 		assert_eq!(engine.config().view_mode, crate::view::ViewMode::Grid);
 		assert_eq!(engine.config().middle_layout, vec![String::from("./")]);
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn selection_survives_a_reload() {
+		let path = temp_folder("selection");
+		std::fs::write(path.join("a.txt"), b"x").unwrap();
+		std::fs::write(path.join("b.txt"), b"x").unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		let id = engine.items()[0].id;
+		engine.dispatch(Command::SelectOnly(id)).unwrap();
+		engine.dispatch(Command::Reload).unwrap();
+		assert!(engine.selection().unwrap().contains(id));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn selection_commands_return_deltas() {
+		let path = temp_folder("selection-delta");
+		for index in 0..3 {
+			std::fs::write(path.join(format!("f{index}")), b"x").unwrap();
+		}
+		let mut engine = Engine::open(&path).unwrap();
+		let id = engine.items()[1].id;
+		let outcome = engine.dispatch(Command::ToggleSelection(id)).unwrap();
+		let delta = outcome.changes.selection.unwrap();
+		assert!(delta.active);
+		assert_eq!(delta.selected, vec![id]);
 		std::fs::remove_dir_all(path).unwrap();
 	}
 
