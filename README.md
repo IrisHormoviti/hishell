@@ -1,17 +1,14 @@
 # hishell
 
-Toolkit-agnostic core for the [Hishell](../hishell-qt) file manager.
+A rust file manager library that handles per forlder configuration, view layouts, selection, actions, file
+operations, navigation plans, and history.
 
-`hishell` owns configuration, locations, view layout, selection, actions, file
-operations, navigation plans, and history. It contains no Qt, Slint, or KDE
-code; frontends render the state it produces.
+A frontend is needed for an actual functional file manager.
 
-`hishell-qt` is the current reference frontend. A Slint frontend is planned.
+Used by [Hishell QT](https://github.com/IrisHormoviti/hishell-qt) and [ClamOS](https://github.com/IrisHormoviti/ClamOS)
 
 ## Building
 
 ```sh
 cargo build
 ```
-
-The crate has no system dependencies.
