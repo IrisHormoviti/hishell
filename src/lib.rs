@@ -14,9 +14,11 @@ pub mod folder;
 pub mod group;
 pub mod icon;
 pub mod item;
+pub mod jobs;
 pub mod layout;
 pub mod location;
 pub mod navigation;
+pub mod ops;
 pub mod path;
 pub mod selection;
 pub mod squashfs;
@@ -26,16 +28,20 @@ pub mod view;
 pub use change::{ChangeScope, ChangeSet, FolderDelta};
 pub use config::{Config, ConfigDelta, ConfigDiagnostic, ConfigKey, ConfigLoad, LocationScope};
 pub use engine::{
-	Command, Deps, Effect, Engine, JobHandle, Mode, OpenOptions, Outcome, RuntimeSettings,
-	TickResult,
+	Command, Deps, Effect, Engine, Mode, OpenOptions, Outcome, RuntimeSettings, TickResult,
 };
 pub use entry::{Entry, EntryType};
 pub use error::Error;
 pub use folder::ScanOptions;
 pub use item::{FsKind, IconRef, Item, ItemId, ItemKind};
+pub use jobs::{CancelToken, JobEvent, JobHandle, JobId, Jobs};
 pub use location::{File, Folder, Location, LocationKind};
 pub use navigation::{
 	NavDirection, NavStep, NavigationPlan, NavigationRequest, PathRelation, SlotAnchor,
+};
+pub use ops::{
+	ClipboardSnapshot, CopyOptions, DeclinedDrop, JobOutcome, Op, OpError, OpFailure, OpKind,
+	OpOutcome, Overwrite, PasteOptions,
 };
 pub use selection::{Selection, SelectionStatus};
 pub use value::ConfigValue;

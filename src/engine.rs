@@ -9,6 +9,7 @@ use crate::config::{Config, ConfigKey, ConfigLoad, ConfigValue};
 use crate::error::Error;
 use crate::folder::{Folder, ScanOptions};
 use crate::item::{Item, ItemId};
+use crate::jobs::JobHandle;
 use crate::location::Location;
 use crate::navigation::{NavigationPlan, NavigationRequest, PathRelation, SlotAnchor, relation};
 use crate::selection::Selection;
@@ -95,9 +96,6 @@ pub enum Effect {
 	Reload(Vec<PathBuf>),
 	Navigate(NavigationPlan),
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct JobHandle(pub u64);
 
 #[derive(Clone, Debug, Default)]
 pub struct Outcome {

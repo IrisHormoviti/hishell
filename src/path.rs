@@ -236,26 +236,6 @@ pub fn complete(base: &str, text: &str, limit: i32) -> String {
 	serde_json::Value::Array(suggestions).to_string()
 }
 
-fn components(path: &str) -> Vec<String> {
-	path.trim()
-		.split('/')
-		.filter(|part| !part.is_empty())
-		.map(str::to_string)
-		.collect()
-}
-
-fn is_under(parts: &[String], prefix: &[String]) -> bool {
-	parts.len() >= prefix.len() && parts[..prefix.len()] == *prefix
-}
-
-fn join(parts: &[String], count: usize) -> String {
-	if count == 0 {
-		String::from("/")
-	} else {
-		format!("/{}", parts[..count].join("/"))
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
