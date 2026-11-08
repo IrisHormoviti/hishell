@@ -73,7 +73,7 @@ impl ConfigParser {
 					origins.insert((section.clone(), key.clone()), path_str.clone());
 					sections
 						.entry(section.clone())
-						.or_insert_with(HashMap::new)
+						.or_default()
 						.insert(key, value);
 				}
 			}
