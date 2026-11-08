@@ -11,6 +11,7 @@ pub mod engine;
 pub mod error;
 pub mod item;
 pub mod location;
+pub mod path;
 pub mod squashfs;
 pub mod value;
 pub mod view;
