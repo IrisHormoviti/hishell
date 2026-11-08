@@ -9,6 +9,7 @@ pub mod config;
 pub mod config_parser;
 pub mod engine;
 pub mod error;
+pub mod folder;
 pub mod item;
 pub mod location;
 pub mod path;
@@ -23,7 +24,7 @@ pub use engine::{
 	TickResult,
 };
 pub use error::Error;
-pub use item::ItemId;
+pub use item::{FsKind, IconRef, Item, ItemId, ItemKind};
 pub use location::{File, Folder, Location, LocationKind};
 pub use value::ConfigValue;
 pub use view::{
@@ -38,7 +39,7 @@ pub mod prelude {
 		Command, Deps, Engine, Mode, OpenOptions, Outcome, RuntimeSettings, TickResult,
 	};
 	pub use crate::error::Error;
-	pub use crate::item::ItemId;
+	pub use crate::item::{FsKind, IconRef, Item, ItemId, ItemKind};
 	pub use crate::location::{File, Folder, Location, LocationKind};
 	pub use crate::value::ConfigValue;
 	pub use crate::view::{

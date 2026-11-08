@@ -5,11 +5,12 @@ use std::path::Path;
 use crate::change::{ChangeSet, LocationDelta};
 use crate::config::{Config, ConfigKey, ConfigLoad, ConfigValue};
 use crate::error::Error;
-use crate::item::ItemId;
+use crate::folder::Folder;
+use crate::item::{Item, ItemId};
 use crate::location::Location;
 use crate::view::{
-	FocusSpec, FolderMode, FolderView, InteractionSpec, ListSpec, PaneId, Preview, ViewRequest,
-	ViewSpec, grid_spec,
+	FocusSpec, FolderMode, FolderView, InteractionSpec, ListSpec, PaneId, Preview, Rect, SlotId,
+	SlotSpec, ViewRequest, ViewSpec, grid_spec,
 };
 
 /// How much on-disk configuration the engine reads.
@@ -90,6 +91,7 @@ pub struct Engine {
 	location: Location,
 	config: Config,
 	runtime: RuntimeSettings,
+	folder: Option<Folder>,
 	diagnostics: Vec<crate::config::ConfigDiagnostic>,
 	revision: u64,
 }
@@ -122,6 +124,7 @@ impl Engine {
 			location,
 			config: Config::default(),
 			runtime: options.runtime,
+			folder: None,
 			diagnostics: Vec::new(),
 			revision: 0,
 		};
@@ -141,6 +144,21 @@ impl Engine {
 		&self.config
 	}
 
+	pub fn items(&self) -> &[Item] {
+		self.folder
+			.as_ref()
+			.map(|folder| folder.items())
+			.unwrap_or_default()
+	}
+
+	pub fn item(&self, id: crate::item::ItemId) -> Option<&Item> {
+		self.folder.as_ref().and_then(|folder| folder.item(id))
+	}
+
+	pub fn item_at(&self, path: &Path) -> Option<&Item> {
+		self.folder.as_ref().and_then(|folder| folder.item_at(path))
+	}
+
 	pub fn diagnostics(&self) -> &[crate::config::ConfigDiagnostic] {
 		&self.diagnostics
 	}
@@ -153,26 +171,30 @@ impl Engine {
 			smooth_scrolling: self.config.smooth_scrolling,
 		};
 		match &self.location {
-			Location::Folder(_) => ViewSpec::Folder(FolderView {
-				revision: self.revision,
-				mode: self.folder_mode(&request),
-				sort: crate::view::SortSpec {
-					key: self.config.sort,
-					date_mode: self.config.sort_date_mode,
-					alpha_mode: self.config.sort_alpha_mode,
-				},
-				grouping: crate::view::GroupingSpec {
-					mode: self.config.group_mode,
-					groups: self.config.groups.clone(),
-				},
-				slots: Vec::new(),
-				headers: Vec::new(),
-				focus: FocusSpec {
-					pane: PaneId(0),
-					item: None,
-				},
-				interaction,
-			}),
+			Location::Folder(_) => {
+				let mode = self.folder_mode(&request);
+				let slots = self.slots(&request, &mode);
+				ViewSpec::Folder(FolderView {
+					revision: self.revision,
+					mode,
+					sort: crate::view::SortSpec {
+						key: self.config.sort,
+						date_mode: self.config.sort_date_mode,
+						alpha_mode: self.config.sort_alpha_mode,
+					},
+					grouping: crate::view::GroupingSpec {
+						mode: self.config.group_mode,
+						groups: self.config.groups.clone(),
+					},
+					slots,
+					headers: Vec::new(),
+					focus: FocusSpec {
+						pane: PaneId(0),
+						item: None,
+					},
+					interaction,
+				})
+			}
 			Location::File(file) => ViewSpec::File(crate::view::FileView {
 				revision: self.revision,
 				item: ItemId::new(0),
@@ -248,6 +270,66 @@ impl Engine {
 		}
 	}
 
+	fn slots(&self, request: &ViewRequest, mode: &FolderMode) -> Vec<SlotSpec> {
+		let Some(folder) = &self.folder else {
+			return Vec::new();
+		};
+		let items = folder.items();
+		match mode {
+			FolderMode::Grid(grid) => {
+				if items.is_empty() {
+					return Vec::new();
+				}
+				let lines = grid.lines.max(1) as usize;
+				let columns = if grid.horizontal {
+					items.len().div_ceil(lines)
+				} else {
+					lines
+				};
+				items
+					.iter()
+					.enumerate()
+					.map(|(index, item)| {
+						let (column, row) = if grid.horizontal {
+							(index / lines, index % lines)
+						} else {
+							(index % columns, index / columns)
+						};
+						SlotSpec {
+							id: SlotId(item.id.get()),
+							item: item.id,
+							cell: (column as u32, row as u32),
+							rect: Rect {
+								x: column as f64 * (grid.cell.width + grid.gap),
+								y: row as f64 * (grid.cell.height + grid.gap),
+								width: grid.cell.width,
+								height: grid.cell.height,
+							},
+						}
+					})
+					.collect()
+			}
+			FolderMode::List(_) => {
+				let height = request.metrics.label_height.max(16.0) + 12.0;
+				items
+					.iter()
+					.enumerate()
+					.map(|(index, item)| SlotSpec {
+						id: SlotId(item.id.get()),
+						item: item.id,
+						cell: (0, index as u32),
+						rect: Rect {
+							x: 0.0,
+							y: index as f64 * height,
+							width: request.viewport.width,
+							height,
+						},
+					})
+					.collect()
+			}
+		}
+	}
+
 	fn reload(&mut self) -> ChangeSet {
 		let diagnostics;
 		if self.mode == Mode::Raw {
@@ -263,6 +345,13 @@ impl Engine {
 			self.apply_runtime();
 		}
 		self.diagnostics = diagnostics;
+		if let Location::Folder(folder) = &self.location {
+			let mut scanned = Folder::scan(folder.path());
+			scanned.sort(self.config.sort);
+			self.folder = Some(scanned);
+		} else {
+			self.folder = None;
+		}
 		self.revision += 1;
 		ChangeSet {
 			location: Some(LocationDelta {
@@ -410,5 +499,43 @@ mod tests {
 			ViewSpec::Folder(_) => panic!("expected a file view"),
 		}
 		std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+	}
+
+	#[test]
+	fn folder_scan_lists_directories_first() {
+		let path = temp_folder("scan");
+		std::fs::write(path.join("b.txt"), b"x").unwrap();
+		std::fs::create_dir_all(path.join("a-dir")).unwrap();
+		let engine = Engine::open(&path).unwrap();
+		let items = engine.items();
+		assert_eq!(items.len(), 2);
+		assert_eq!(items[0].name, "a-dir");
+		assert!(engine.item_at(&path.join("b.txt")).is_some());
+		assert!(engine.item(items[0].id).is_some());
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn view_places_every_item_in_a_slot() {
+		let path = temp_folder("slots");
+		for index in 0..5 {
+			std::fs::write(path.join(format!("f{index}")), b"x").unwrap();
+		}
+		let engine = Engine::open(&path).unwrap();
+		match engine.view(request()) {
+			ViewSpec::Folder(view) => {
+				assert_eq!(view.slots.len(), 5);
+				match view.mode {
+					FolderMode::Grid(grid) => {
+						assert_eq!(grid.lines, 4);
+						let rows = view.slots.iter().map(|slot| slot.cell.1).max().unwrap();
+						assert_eq!(rows, 1);
+					}
+					FolderMode::List(_) => panic!("expected a grid"),
+				}
+			}
+			ViewSpec::File(_) => panic!("expected a folder view"),
+		}
+		std::fs::remove_dir_all(path).unwrap();
 	}
 }

@@ -1,4 +1,6 @@
-//! Identity of entries in a folder.
+//! Identity and description of entries in a folder.
+
+use std::path::PathBuf;
 
 /// Stable identity of one item while it remains in the folder.
 #[derive(
@@ -14,4 +16,58 @@ impl ItemId {
 	pub fn get(self) -> u64 {
 		self.0
 	}
+}
+
+#[derive(
+	Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum FsKind {
+	File,
+	Directory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ItemKind {
+	Directory,
+	File,
+	Application,
+	Link,
+	Button,
+	Toggle,
+	Number,
+	Radio,
+}
+
+impl ItemKind {
+	pub fn from_fs(kind: FsKind) -> Self {
+		match kind {
+			FsKind::Directory => Self::Directory,
+			FsKind::File => Self::File,
+		}
+	}
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum IconRef {
+	Theme(String),
+	Path(PathBuf),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Item {
+	pub id: ItemId,
+	pub name: String,
+	pub title: String,
+	pub comment: String,
+	pub path: PathBuf,
+	pub fs_kind: FsKind,
+	pub kind: ItemKind,
+	pub mime: Option<String>,
+	pub icon: IconRef,
+	pub is_symlink: bool,
+	pub is_dotfile: bool,
+	pub size: u64,
+	pub modified: u64,
+	pub created: u64,
+	pub accessed: u64,
 }
