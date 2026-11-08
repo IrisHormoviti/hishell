@@ -135,6 +135,12 @@ impl Folder {
 				&& crate::appimage::is_appimage(&raw.path))
 			.then(|| crate::appimage::entry(&raw.path))
 			.flatten();
+			if options.read_entries && raw.fs_kind == FsKind::File {
+				crate::descriptor_generator::request(&raw.path, path);
+			}
+			let generated = (raw.fs_kind == FsKind::File)
+				.then(|| crate::descriptor_generator::result_for(&raw.path.to_string_lossy()))
+				.flatten();
 			let icon = entry
 				.and_then(Entry::icon_ref)
 				.or_else(|| {
@@ -147,6 +153,18 @@ impl Folder {
 						.as_ref()
 						.and_then(|entry| entry.icon.clone())
 						.map(IconRef::Path)
+				})
+				.or_else(|| {
+					generated
+						.as_ref()
+						.and_then(|entry| entry.icon.as_deref())
+						.map(crate::descriptor_generator::icon_ref)
+				})
+				.or_else(|| {
+					(raw.fs_kind == FsKind::File)
+						.then(|| crate::descriptor_generator::placeholder_icon(&raw.path))
+						.flatten()
+						.map(IconRef::Theme)
 				})
 				.unwrap_or_else(|| match raw.fs_kind {
 					FsKind::Directory => IconRef::Theme(String::from("folder")),
@@ -161,6 +179,7 @@ impl Folder {
 					.and_then(|entry| entry.name.clone())
 					.or_else(|| descriptor.as_ref().and_then(|entry| entry.name.clone()))
 					.or_else(|| appimage.as_ref().and_then(|entry| entry.name.clone()))
+					.or_else(|| generated.as_ref().and_then(|entry| entry.name.clone()))
 					.unwrap_or_else(|| name.clone()),
 				comment: entry
 					.and_then(|entry| entry.comment.clone())
