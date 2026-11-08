@@ -11,6 +11,7 @@ pub mod engine;
 pub mod entry;
 pub mod error;
 pub mod execution;
+pub mod focus;
 pub mod folder;
 pub mod group;
 pub mod history;
@@ -41,6 +42,7 @@ pub use execution::{
 	LaunchError, LaunchEvent, LaunchId, LaunchOutcome, LaunchRequest, LaunchWarning, SpawnRequest,
 	Spawner, SystemClock,
 };
+pub use focus::{Direction, Focus, FocusCommand};
 pub use folder::ScanOptions;
 pub use history::{History, HistoryCommand, HistoryEntry, HistoryStatus};
 pub use item::{FsKind, IconRef, Item, ItemId, ItemKind};

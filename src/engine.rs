@@ -5,13 +5,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::change::{ChangeScope, ChangeSet, FolderDelta, LocationDelta, SelectionDelta};
+use crate::change::{
+	ChangeScope, ChangeSet, FocusDelta, FolderDelta, LocationDelta, SelectionDelta,
+};
 use crate::config::{Config, ConfigKey, ConfigLoad, ConfigValue};
 use crate::error::Error;
 use crate::execution::{
 	Execution, ExecutionWrapper, LaunchEvent, LaunchId, LaunchOutcome, LaunchRequest, Spawner,
 	SystemClock,
 };
+use crate::focus::{Focus, FocusCommand};
 use crate::folder::{Folder, ScanOptions};
 use crate::history::{History, HistoryCommand, HistoryEntry, HistoryStatus};
 use crate::item::{Item, ItemId};
@@ -127,6 +130,7 @@ pub enum Command {
 	CancelLaunch(LaunchId),
 	QuitActive(PathBuf),
 	History(HistoryCommand),
+	Focus(FocusCommand),
 }
 
 #[derive(Clone, Debug)]
@@ -137,6 +141,7 @@ pub enum Effect {
 	Job(JobEvent),
 	Launch(LaunchOutcome),
 	LaunchEvent(LaunchEvent),
+	FocusActivate(ItemId),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -166,6 +171,7 @@ pub struct Engine {
 	execution: Execution,
 	platform: crate::platform::Platform,
 	history: History,
+	focus: Focus,
 }
 
 impl Engine {
@@ -221,6 +227,7 @@ impl Engine {
 			execution: Execution::new(wrapper, screen, spawner, Arc::new(SystemClock)),
 			platform: options.deps.platform,
 			history: History::default(),
+			focus: Focus::default(),
 		};
 		engine.reload();
 		engine.history.record(HistoryEntry {
@@ -330,8 +337,8 @@ impl Engine {
 					slots: layout.slots,
 					headers: layout.headers,
 					focus: FocusSpec {
-						pane: PaneId(0),
-						item: None,
+						pane: self.focus.pane(),
+						item: self.focus.item(),
 					},
 					interaction,
 				};
@@ -499,6 +506,9 @@ impl Engine {
 				self.execution.quit(&path).map_err(Error::Launch)?;
 				return Ok(Outcome::default());
 			}
+			Command::Focus(command) => {
+				return Ok(self.focus_command(command));
+			}
 			Command::History(command) => {
 				let entry = match command {
 					HistoryCommand::Back => self.history.back(),
@@ -550,6 +560,74 @@ impl Engine {
 		self.history.entries()
 	}
 
+	pub fn focus(&self) -> Option<ItemId> {
+		self.focus.item()
+	}
+
+	fn focus_command(&mut self, command: FocusCommand) -> Outcome {
+		let previous = self.focus.item();
+		let order = self
+			.folder
+			.as_ref()
+			.map(|folder| folder.order().to_vec())
+			.unwrap_or_default();
+		match command {
+			FocusCommand::First => self.focus.first(&order),
+			FocusCommand::Last => self.focus.last(&order),
+			FocusCommand::Move(direction) => {
+				self.focus.set_columns(self.focus_columns());
+				self.focus.move_focus(direction, &order);
+			}
+			FocusCommand::Set { pane, path } => {
+				let item = self.item_at(&path).map(|item| item.id);
+				self.focus.set(pane, item);
+			}
+			FocusCommand::Clear => self.focus.set(self.focus.pane(), None),
+			FocusCommand::Activate => {
+				return Outcome {
+					changes: ChangeSet::default(),
+					effects: self
+						.focus
+						.item()
+						.map(Effect::FocusActivate)
+						.into_iter()
+						.collect(),
+					job: None,
+				};
+			}
+		}
+		Outcome {
+			changes: ChangeSet {
+				focus: Some(FocusDelta {
+					pane: self.focus.pane(),
+					item: self.focus.item(),
+					previous,
+				}),
+				..ChangeSet::default()
+			},
+			effects: Vec::new(),
+			job: None,
+		}
+	}
+
+	fn focus_columns(&self) -> usize {
+		let last_view = self.last_view.borrow();
+		let Some(view) = last_view.as_ref() else {
+			return 1;
+		};
+		match &view.mode {
+			FolderMode::Grid(grid) => {
+				if grid.horizontal {
+					let items = self.folder.as_ref().map(Folder::len).unwrap_or(0);
+					items.div_ceil(grid.lines.max(1) as usize).max(1)
+				} else {
+					grid.lines.max(1) as usize
+				}
+			}
+			FolderMode::List(_) => 1,
+		}
+	}
+
 	/// Whether the current folder's `[Radio]` group accepts `path` as a choice.
 	pub fn is_radio_member(&self, path: &Path) -> bool {
 		self.folder
@@ -575,6 +653,11 @@ impl Engine {
 				focus: plan.focus.clone(),
 			});
 		}
+		let focus = plan
+			.focus
+			.as_deref()
+			.and_then(|path| self.item_at(path).map(|item| item.id));
+		self.focus.set(plan.pane, focus);
 		Outcome {
 			changes,
 			effects: vec![Effect::Navigate(plan)],
@@ -1201,9 +1284,11 @@ mod tests {
 				assert_eq!(plan.to, child);
 				assert_eq!(plan.from, path);
 			}
-			Effect::Reload(_) | Effect::Job(_) | Effect::Launch(_) | Effect::LaunchEvent(_) => {
-				panic!("expected a navigation plan")
-			}
+			Effect::Reload(_)
+			| Effect::Job(_)
+			| Effect::Launch(_)
+			| Effect::LaunchEvent(_)
+			| Effect::FocusActivate(_) => panic!("expected a navigation plan"),
 		}
 		std::fs::remove_dir_all(path).unwrap();
 	}
