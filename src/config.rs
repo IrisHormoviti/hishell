@@ -256,7 +256,7 @@ impl Config {
 			native_menus: false,
 			native_titlebar: true,
 			native_drag: false,
-			show_shortcuts: false,
+			show_shortcuts: true,
 			execution_wrapper: String::new(),
 			screen: String::new(),
 			center_focus: false,
