@@ -44,6 +44,7 @@ pub struct RuntimeSettings {
 #[non_exhaustive]
 pub struct Deps {
 	pub spawner: Option<Arc<dyn Spawner>>,
+	pub platform: crate::platform::Platform,
 }
 
 impl std::fmt::Debug for Deps {
@@ -51,21 +52,35 @@ impl std::fmt::Debug for Deps {
 		formatter
 			.debug_struct("Deps")
 			.field("spawner", &self.spawner.is_some())
+			.field("platform", &self.platform)
 			.finish()
 	}
 }
 
 impl Deps {
 	pub fn free_desktop() -> Self {
-		Self::default()
+		Self {
+			platform: crate::platform::Platform::free_desktop(),
+			..Self::default()
+		}
 	}
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct OpenOptions {
 	pub mode: Mode,
 	pub deps: Deps,
 	pub runtime: RuntimeSettings,
+}
+
+impl Default for OpenOptions {
+	fn default() -> Self {
+		Self {
+			mode: Mode::default(),
+			deps: Deps::free_desktop(),
+			runtime: RuntimeSettings::default(),
+		}
+	}
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +162,7 @@ pub struct Engine {
 	last_view: RefCell<Option<FolderView>>,
 	jobs: Jobs,
 	execution: Execution,
+	platform: crate::platform::Platform,
 }
 
 impl Engine {
@@ -200,6 +216,7 @@ impl Engine {
 			last_view: RefCell::new(None),
 			jobs: Jobs::default(),
 			execution: Execution::new(wrapper, screen, spawner, Arc::new(SystemClock)),
+			platform: options.deps.platform,
 		};
 		engine.reload();
 		Ok(engine)
@@ -317,7 +334,7 @@ impl Engine {
 				ViewSpec::File(crate::view::FileView {
 					revision: self.revision,
 					item: ItemId::new(0),
-					mime: mime_for(file.path()),
+					mime: self.platform.mime_type(file.path()).0,
 					thumbnail: None,
 					metadata: Vec::new(),
 					preview: Preview::None,
@@ -697,15 +714,6 @@ fn raw_config(runtime: &RuntimeSettings) -> Config {
 		execution_wrapper: runtime.execution_wrapper.clone().unwrap_or_default(),
 		screen: runtime.screen.clone().unwrap_or_default(),
 		..Config::default()
-	}
-}
-
-fn mime_for(path: &Path) -> String {
-	match path.extension().and_then(|value| value.to_str()) {
-		Some(extension) => mime_guess::from_ext(extension)
-			.first_or_octet_stream()
-			.to_string(),
-		None => String::from("application/octet-stream"),
 	}
 }
 
@@ -1212,6 +1220,7 @@ mod tests {
 			OpenOptions {
 				deps: Deps {
 					spawner: Some(Arc::new(AcceptAll)),
+					..Deps::default()
 				},
 				..OpenOptions::default()
 			},

@@ -21,6 +21,7 @@ pub mod location;
 pub mod navigation;
 pub mod ops;
 pub mod path;
+pub mod platform;
 pub mod selection;
 pub mod squashfs;
 pub mod value;
@@ -48,6 +49,10 @@ pub use navigation::{
 pub use ops::{
 	ClipboardSnapshot, CopyOptions, DeclinedDrop, JobOutcome, Op, OpError, OpFailure, OpKind,
 	OpOutcome, Overwrite, PasteOptions,
+};
+pub use platform::{
+	AppCatalog, AppEntry, FreeDesktopApps, FreeDesktopMime, Launcher, Mime, MimeResolver, Platform,
+	PlatformError, Portal, PortalState, SoundPlayer, Thumbnail, ThumbnailRequest, Thumbnailer,
 };
 pub use selection::{Selection, SelectionStatus};
 pub use value::ConfigValue;
