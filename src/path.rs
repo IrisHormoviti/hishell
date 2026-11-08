@@ -84,48 +84,32 @@ pub fn normalize(path: &str) -> String {
 
 /// Plan a folder transition between two absolute paths, lexically.
 ///
-/// Returns `{ "relation", "close", "open" }`. `close` lists the folders to
-/// leave one level at a time, from the current folder up to the nearest common
-/// ancestor; `open` lists the folders to enter from that ancestor down to the
-/// destination. Symlinks are not resolved.
+/// Returns `{ "relation", "close", "open" }`, the JSON projection of
+/// [`crate::navigation::plan`] that the Qt frontend still reads.
 pub fn navigation_plan(from: &str, to: &str) -> String {
-	let from_parts = components(from);
-	let to_parts = components(to);
-	let mut close = Vec::new();
-	let mut open = Vec::new();
-	let relation;
-	if from_parts == to_parts {
-		relation = "same";
-	} else if is_under(&to_parts, &from_parts) {
-		relation = "child";
-		for depth in from_parts.len()..to_parts.len() {
-			open.push(join(&to_parts, depth + 1));
-		}
-	} else if is_under(&from_parts, &to_parts) {
-		relation = "parent";
-		for depth in (to_parts.len()..from_parts.len()).rev() {
-			close.push(join(&from_parts, depth + 1));
-		}
-	} else {
-		relation = "sibling";
-		let mut common = 0;
-		while common < from_parts.len()
-			&& common < to_parts.len()
-			&& from_parts[common] == to_parts[common]
-		{
-			common += 1;
-		}
-		for depth in (common..from_parts.len()).rev() {
-			close.push(join(&from_parts, depth + 1));
-		}
-		for depth in common..to_parts.len() {
-			open.push(join(&to_parts, depth + 1));
-		}
-	}
+	let request = crate::navigation::NavigationRequest {
+		pane: crate::view::PaneId(0),
+		target: PathBuf::from(to),
+		record_history: true,
+	};
+	let plan = crate::navigation::plan(&request, Path::new(from), false);
+	let relation = match plan.relation {
+		crate::navigation::PathRelation::Same => "same",
+		crate::navigation::PathRelation::Child { .. } => "child",
+		crate::navigation::PathRelation::Parent { .. } => "parent",
+		crate::navigation::PathRelation::Sibling { .. }
+		| crate::navigation::PathRelation::Unrelated { .. } => "sibling",
+	};
+	let paths = |steps: &[crate::navigation::NavStep]| {
+		steps
+			.iter()
+			.map(|step| step.path.to_string_lossy().into_owned())
+			.collect::<Vec<_>>()
+	};
 	serde_json::json!({
 		"relation": relation,
-		"close": close,
-		"open": open,
+		"close": paths(&plan.close),
+		"open": paths(&plan.open),
 	})
 	.to_string()
 }
