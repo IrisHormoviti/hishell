@@ -162,6 +162,32 @@ mod tests {
 	}
 
 	#[test]
+	fn a_root_indexes_descriptors_by_target() {
+		let root = std::env::temp_dir().join(format!("hishell-descriptor-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&root);
+		let descriptors = root.join("directories");
+		let target = root.join("SD Card");
+		std::fs::create_dir_all(&descriptors).unwrap();
+		std::fs::create_dir_all(&target).unwrap();
+		std::fs::write(
+			descriptors.join("sd.desktop"),
+			format!(
+				"[Desktop Entry]\nType=Directory\nPath={}\nName=SD Card\n",
+				target.display()
+			),
+		)
+		.unwrap();
+		let mut map = HashMap::new();
+		read_root(&descriptors, &mut map);
+		let key = target.canonicalize().unwrap();
+		assert_eq!(
+			map.get(&key).and_then(|entry| entry.name.as_deref()),
+			Some("SD Card")
+		);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
 	fn a_relative_icon_resolves_against_the_descriptor() {
 		let (_, descriptor) = parse(
 			"[Desktop Entry]\nPath=/mnt/sdcard\nIcon=icons/sd.png\n",
