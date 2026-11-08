@@ -441,7 +441,7 @@ pub struct FocusSpec {
 	pub item: Option<ItemId>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SlotId(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq)]

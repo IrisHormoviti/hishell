@@ -16,6 +16,7 @@ pub mod icon;
 pub mod item;
 pub mod layout;
 pub mod location;
+pub mod navigation;
 pub mod path;
 pub mod selection;
 pub mod squashfs;
@@ -33,6 +34,9 @@ pub use error::Error;
 pub use folder::ScanOptions;
 pub use item::{FsKind, IconRef, Item, ItemId, ItemKind};
 pub use location::{File, Folder, Location, LocationKind};
+pub use navigation::{
+	NavDirection, NavStep, NavigationPlan, NavigationRequest, PathRelation, SlotAnchor,
+};
 pub use selection::{Selection, SelectionStatus};
 pub use value::ConfigValue;
 pub use view::{

@@ -1,7 +1,8 @@
 //! The engine facade: state, configuration, and view layout.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::change::{ChangeScope, ChangeSet, FolderDelta, LocationDelta, SelectionDelta};
 use crate::config::{Config, ConfigKey, ConfigLoad, ConfigValue};
@@ -9,6 +10,7 @@ use crate::error::Error;
 use crate::folder::{Folder, ScanOptions};
 use crate::item::{Item, ItemId};
 use crate::location::Location;
+use crate::navigation::{NavigationPlan, NavigationRequest, PathRelation, SlotAnchor, relation};
 use crate::selection::Selection;
 use crate::view::{
 	FocusSpec, FolderMode, FolderView, InteractionSpec, ListSpec, PaneId, Preview, ViewRequest,
@@ -83,12 +85,15 @@ pub enum Command {
 		from: String,
 		to: String,
 	},
+	Navigate(NavigationRequest),
+	GoUp,
 }
 
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum Effect {
-	Reload(Vec<std::path::PathBuf>),
+	Reload(Vec<PathBuf>),
+	Navigate(NavigationPlan),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +121,7 @@ pub struct Engine {
 	diagnostics: Vec<crate::config::ConfigDiagnostic>,
 	config_diagnostics: Vec<crate::config::ConfigDiagnostic>,
 	revision: u64,
+	last_view: RefCell<Option<FolderView>>,
 }
 
 impl Engine {
@@ -150,6 +156,7 @@ impl Engine {
 			diagnostics: Vec::new(),
 			config_diagnostics: Vec::new(),
 			revision: 0,
+			last_view: RefCell::new(None),
 		};
 		engine.reload();
 		Ok(engine)
@@ -190,6 +197,43 @@ impl Engine {
 		self.folder.as_ref().map(|folder| folder.selection())
 	}
 
+	pub fn relation(&self, target: &Path) -> PathRelation {
+		relation(&self.folder_path(), target)
+	}
+
+	pub fn navigation_plan(&self, request: &NavigationRequest) -> NavigationPlan {
+		crate::navigation::plan(request, &self.folder_path(), self.config.smooth_scrolling)
+	}
+
+	/// The slot of `path` in the last view the frontend asked for, when it is
+	/// visible there.
+	pub fn anchor_for(&self, pane: PaneId, path: &Path) -> Option<SlotAnchor> {
+		let view = self.last_view.borrow();
+		let view = view.as_ref()?;
+		if view.focus.pane != pane {
+			return None;
+		}
+		let item = self.item_at(path)?;
+		let slot = view.slots.iter().find(|slot| slot.item == item.id)?;
+		Some(SlotAnchor {
+			item: item.id,
+			slot: slot.id,
+			visible: true,
+		})
+	}
+
+	/// The nearest ancestor of `target` that the current view shows.
+	pub fn closest_visible_parent(&self, pane: PaneId, target: &Path) -> Option<SlotAnchor> {
+		let mut current = target.parent();
+		while let Some(path) = current {
+			if let Some(anchor) = self.anchor_for(pane, path) {
+				return Some(anchor);
+			}
+			current = path.parent();
+		}
+		None
+	}
+
 	pub fn view(&self, request: ViewRequest) -> ViewSpec {
 		let interaction = InteractionSpec {
 			open_on_click: self.config.open_on_click,
@@ -202,7 +246,7 @@ impl Engine {
 				let mode = self.folder_mode(&request);
 				let items = self.folder.as_ref().map(Folder::items).unwrap_or_default();
 				let layout = crate::layout::folder(&self.config, &request, &mode, items);
-				ViewSpec::Folder(FolderView {
+				let view = FolderView {
 					revision: self.revision,
 					mode,
 					sort: crate::view::SortSpec {
@@ -221,17 +265,22 @@ impl Engine {
 						item: None,
 					},
 					interaction,
+				};
+				*self.last_view.borrow_mut() = Some(view.clone());
+				ViewSpec::Folder(view)
+			}
+			Location::File(file) => {
+				*self.last_view.borrow_mut() = None;
+				ViewSpec::File(crate::view::FileView {
+					revision: self.revision,
+					item: ItemId::new(0),
+					mime: mime_for(file.path()),
+					thumbnail: None,
+					metadata: Vec::new(),
+					preview: Preview::None,
+					interaction,
 				})
 			}
-			Location::File(file) => ViewSpec::File(crate::view::FileView {
-				revision: self.revision,
-				item: ItemId::new(0),
-				mime: mime_for(file.path()),
-				thumbnail: None,
-				metadata: Vec::new(),
-				preview: Preview::None,
-				interaction,
-			}),
 		}
 	}
 
@@ -323,6 +372,23 @@ impl Engine {
 					ChangeSet::default()
 				}
 			}
+			Command::Navigate(request) => {
+				let plan = self.navigation_plan(&request);
+				return Ok(self.navigate(plan));
+			}
+			Command::GoUp => {
+				let request = NavigationRequest {
+					pane: PaneId(0),
+					target: self
+						.folder_path()
+						.parent()
+						.map(Path::to_path_buf)
+						.unwrap_or_else(|| PathBuf::from("/")),
+					record_history: true,
+				};
+				let plan = self.navigation_plan(&request);
+				return Ok(self.navigate(plan));
+			}
 		};
 		Ok(Outcome {
 			changes,
@@ -340,6 +406,24 @@ impl Engine {
 		self.folder
 			.as_ref()
 			.is_some_and(|folder| folder.is_radio_member(path, &self.config))
+	}
+
+	fn folder_path(&self) -> PathBuf {
+		match &self.location {
+			Location::Folder(folder) => folder.path().to_path_buf(),
+			Location::File(file) => file.parent().to_path_buf(),
+		}
+	}
+
+	fn navigate(&mut self, plan: NavigationPlan) -> Outcome {
+		self.location = Location::folder(plan.to.clone());
+		self.folder = None;
+		let changes = self.reload();
+		Outcome {
+			changes,
+			effects: vec![Effect::Navigate(plan)],
+			job: None,
+		}
 	}
 
 	fn folder_mode(&self, request: &ViewRequest) -> FolderMode {
@@ -904,6 +988,45 @@ mod tests {
 			.unwrap();
 		assert!(engine.is_radio_member(&path.join("one")));
 		assert!(!engine.is_radio_member(&other));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn navigation_changes_location_and_returns_a_plan() {
+		let path = temp_folder("navigate");
+		let child = path.join("child");
+		std::fs::create_dir_all(&child).unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		let outcome = engine
+			.dispatch(Command::Navigate(crate::navigation::NavigationRequest {
+				pane: PaneId(0),
+				target: child.clone(),
+				record_history: true,
+			}))
+			.unwrap();
+		assert_eq!(engine.location().path(), child);
+		match &outcome.effects[0] {
+			Effect::Navigate(plan) => {
+				assert_eq!(plan.to, child);
+				assert_eq!(plan.from, path);
+			}
+			Effect::Reload(_) => panic!("expected a navigation plan"),
+		}
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn anchors_resolve_against_the_last_view() {
+		let path = temp_folder("anchor");
+		let child = path.join("child");
+		std::fs::create_dir_all(&child).unwrap();
+		let nested = child.join("nested");
+		std::fs::create_dir_all(&nested).unwrap();
+		let engine = Engine::open(&path).unwrap();
+		let _ = engine.view(request());
+		assert!(engine.anchor_for(PaneId(0), &child).is_some());
+		assert!(engine.anchor_for(PaneId(0), &nested).is_none());
+		assert!(engine.closest_visible_parent(PaneId(0), &nested).is_some());
 		std::fs::remove_dir_all(path).unwrap();
 	}
 
