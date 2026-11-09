@@ -551,9 +551,9 @@ pub fn grid_spec(config: &Config, request: &ViewRequest) -> GridSpec {
 		small * 2.0
 	};
 
-	let (sizing, lines, icon_size) = match config.grid_mode {
-		GridMode::Lines => {
-			let lines = config.lines.clamp(1, 8) as f64;
+	let (sizing, lines, icon_size) = match config.grid_sizing() {
+		GridSizing::FixedLines { lines } => {
+			let lines = lines as f64;
 			let cell = (main / lines - gap).min(main / 2.0 - gap);
 			// Labels below the icon take two lines, so leave them room by
 			// trimming the derived icon a little.
@@ -569,12 +569,8 @@ pub fn grid_spec(config: &Config, request: &ViewRequest) -> GridSpec {
 				icon,
 			)
 		}
-		GridMode::Size => {
-			let icon = if config.grid_size == 0 {
-				72.0
-			} else {
-				(config.grid_size as f64).clamp(16.0, 256.0)
-			};
+		GridSizing::FixedIcon { icon_size } => {
+			let icon = icon_size as f64;
 			let pitch = icon + padding + gap;
 			// The line count is derived from the viewport, so a small fixed
 			// icon can need far more than the eight lines the explicit Lines
@@ -583,7 +579,7 @@ pub fn grid_spec(config: &Config, request: &ViewRequest) -> GridSpec {
 			let lines = (((main + gap) / pitch).floor() as i64).clamp(1, 255) as u8;
 			(
 				GridSizing::FixedIcon {
-					icon_size: icon as u16,
+					icon_size: icon_size,
 				},
 				lines,
 				icon,
@@ -654,6 +650,14 @@ mod tests {
 		assert_eq!(spec.lines, 4);
 		assert_eq!(spec.sizing, GridSizing::FixedLines { lines: 4 });
 		assert!(spec.icon_size >= 16.0 && spec.icon_size <= 256.0);
+	}
+
+	#[test]
+	fn auto_lines_means_four() {
+		let config = Config::default();
+		let spec = grid_spec(&config, &request(400.0, 300.0));
+		assert_eq!(spec.lines, 4);
+		assert_eq!(spec.sizing, GridSizing::FixedLines { lines: 4 });
 	}
 
 	#[test]
