@@ -622,6 +622,9 @@ impl Engine {
 		let mut subjects = ActionSubjects::HERE;
 		for item in items.drain(..) {
 			subjects = subjects.union(item_subjects(item));
+			if self.is_radio_member(&item.path) {
+				subjects = subjects.union(ActionSubjects::RADIO);
+			}
 		}
 		let scope = self.location.kind();
 		let location = match scope {
@@ -742,9 +745,78 @@ impl Engine {
 				})])),
 				None => Ok(Outcome::default()),
 			},
+			ActionId::RADIO => match first {
+				Some(item) => {
+					let value = crate::folder::radio_value(&item.path);
+					if value.is_empty() {
+						return Ok(Outcome::default());
+					}
+					let delta = self.config.set_raw(
+						&self.location,
+						"Radio",
+						"Selected",
+						&value,
+						true,
+					)?;
+					let folder = self.apply_config_change(delta.scope);
+					self.revision += 1;
+					let exec = self.config.radio_exec.clone();
+					let mut outcome = Outcome {
+						changes: ChangeSet {
+							config: vec![delta],
+							folder,
+							..ChangeSet::default()
+						},
+						..Outcome::default()
+					};
+					if !exec.trim().is_empty() {
+						let launch = self.dispatch(Command::Launch(
+							LaunchRequest::Radio {
+								exec,
+								value,
+								name: item.title.clone(),
+								path: item.path.clone(),
+							},
+						))?;
+						outcome.effects.extend(launch.effects);
+					}
+					Ok(outcome)
+				}
+				None => Ok(Outcome::default()),
+			},
 			ActionId::TOGGLE => match first {
 				Some(item) => {
-					self.dispatch(Command::Run(crate::ops::Op::Toggle { path: item.path }))
+					// A provider-owned toggle runs its Exec with the target
+					// state and writes `Toggle=` itself. Without one, flip the
+					// entry directly.
+					let directory = item.path.is_dir();
+					let entry_path = if directory {
+						item.path.join(".directory")
+					} else {
+						item.path.clone()
+					};
+					let kind = if directory {
+						crate::item::FsKind::Directory
+					} else {
+						crate::item::FsKind::File
+					};
+					let has_exec = crate::entry::Entry::read(&entry_path, kind)
+						.is_some_and(|entry| {
+							entry
+								.exec
+								.as_deref()
+								.is_some_and(|exec| !exec.trim().is_empty())
+						});
+					if has_exec {
+						self.dispatch(Command::Launch(LaunchRequest::Control {
+							path: item.path.clone(),
+							values: Vec::new(),
+						}))
+					} else {
+						self.dispatch(Command::Run(crate::ops::Op::Toggle {
+							path: item.path.clone(),
+						}))
+					}
 				}
 				None => Ok(Outcome::default()),
 			},
@@ -1811,6 +1883,62 @@ mod tests {
 		assert!(matches!(outcome.effects[0], Effect::Navigate(_)));
 		assert_eq!(engine.location().path(), folder);
 
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn selecting_a_radio_choice_writes_and_launches() {
+		let path = temp_folder("radio-select");
+		std::fs::write(
+			path.join(".directory"),
+			"[Radio]\nEnabled = true\nSelected =\nExec = /bin/true %v %n %p\n",
+		)
+		.unwrap();
+		let choice = path.join("one");
+		std::fs::create_dir_all(&choice).unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: choice,
+			}))
+			.unwrap();
+		let actions = engine.actions(&ActionRequest {
+			menu: MenuKind::Context,
+			target: Target::Focus,
+		});
+		assert!(actions.iter().any(|action| action.id == ActionId::RADIO));
+		let outcome = engine.dispatch(Command::Invoke(ActionId::RADIO)).unwrap();
+		assert_eq!(engine.config().radio_selected, "one");
+		assert!(matches!(outcome.effects.first(), Some(Effect::Launch(_))));
+		let text = std::fs::read_to_string(path.join(".directory")).unwrap();
+		assert!(text.contains("Selected = one"));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn toggle_with_a_provider_launches_its_exec() {
+		let path = temp_folder("toggle-provider");
+		let toggle = path.join("mute.desktop");
+		std::fs::write(
+			&toggle,
+			"[Desktop Entry]\nType=Toggle\nName=Mute\nExec=/bin/true %v\nToggle=false\n",
+		)
+		.unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: toggle.clone(),
+			}))
+			.unwrap();
+		let outcome = engine
+			.dispatch(Command::Invoke(ActionId::TOGGLE))
+			.unwrap();
+		assert!(matches!(outcome.effects.first(), Some(Effect::Launch(_))));
+		// The provider owns the stored state.
+		let text = std::fs::read_to_string(&toggle).unwrap();
+		assert!(text.contains("Toggle=false"));
 		std::fs::remove_dir_all(path).unwrap();
 	}
 

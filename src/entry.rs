@@ -63,6 +63,16 @@ impl EntryType {
 	}
 }
 
+/// One labelled integer a `Type=Number` dialog edits.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NumberField {
+	pub label: String,
+	pub value: i64,
+	pub min: i64,
+	pub max: i64,
+	pub default: i64,
+}
+
 /// The metadata a desktop entry supplies for one item.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
@@ -75,11 +85,23 @@ pub struct Entry {
 	pub comment: Option<String>,
 	pub icon: Option<String>,
 	pub exec: Option<String>,
+	/// `Terminal=true`: run the command in a terminal emulator window.
+	pub terminal: bool,
+	/// Extra arguments passed to the terminal before the command.
+	pub terminal_options: Option<String>,
 	pub launch_animation: Option<String>,
 	pub hidden: bool,
 	pub no_display: bool,
 	pub toggle: bool,
 	pub number_value: String,
+	pub number_fields: Vec<NumberField>,
+	/// Written by a provider daemon rather than the user.
+	pub generated: bool,
+	/// Provider actions for a generated entry or section.
+	pub destroy: Option<String>,
+	pub reset: Option<String>,
+	pub rename: Option<String>,
+	pub refresh: Option<String>,
 	pub custom_group: Option<String>,
 	pub diagnostics: Vec<ConfigDiagnostic>,
 }
@@ -156,11 +178,20 @@ impl Entry {
 			comment: string("Comment").filter(|comment| !comment.is_empty()),
 			icon: string("Icon").filter(|icon| !icon.is_empty()),
 			exec,
+			terminal: value_bool(values.get("Terminal")),
+			terminal_options: string("TerminalOptions")
+				.filter(|value| !value.trim().is_empty()),
 			launch_animation: string("LaunchAnimation").filter(|value| !value.trim().is_empty()),
 			hidden: value_bool(values.get("Hidden")),
 			no_display: value_bool(values.get("NoDisplay")),
 			toggle: value_bool(values.get("Toggle")),
 			number_value: number_value(values),
+			number_fields: number_fields(values),
+			generated: value_bool(values.get("Generated")),
+			destroy: string("Destroy").filter(|command| !command.trim().is_empty()),
+			reset: string("Reset").filter(|command| !command.trim().is_empty()),
+			rename: string("Rename").filter(|command| !command.trim().is_empty()),
+			refresh: string("Refresh").filter(|command| !command.trim().is_empty()),
 			custom_group: string("Group").filter(|group| !group.trim().is_empty()),
 			diagnostics,
 		})
@@ -174,6 +205,31 @@ impl Entry {
 			.as_deref()
 			.filter(|exec| !exec.trim().is_empty())
 			.ok_or_else(|| String::from("entry has no Exec"))?;
+		self.exec_args_from(exec, file)
+	}
+
+	/// The provider command for a `Type=Toggle` or `Type=Number` control.
+	/// Toggle targets replace `%v` with `on`/`off`; number values replace
+	/// `%1`, `%2`, …
+	pub fn control_args(&self, values: &[i64]) -> Result<Vec<String>, String> {
+		let exec = self
+			.exec
+			.as_deref()
+			.filter(|exec| !exec.trim().is_empty())
+			.ok_or_else(|| String::from("entry has no Exec"))?;
+		let expanded = if values.is_empty() {
+			exec.replace("%v", if self.toggle { "off" } else { "on" })
+		} else {
+			let mut expanded = exec.to_string();
+			for (index, value) in values.iter().enumerate() {
+				expanded = expanded.replace(&format!("%{}", index + 1), &value.to_string());
+			}
+			expanded
+		};
+		self.exec_args_from(&expanded, None)
+	}
+
+	fn exec_args_from(&self, exec: &str, file: Option<&Path>) -> Result<Vec<String>, String> {
 		let tokens = tokenize_exec(exec)?;
 		let mut args = Vec::new();
 		for token in tokens {
@@ -214,6 +270,69 @@ impl Entry {
 			}
 		}
 		Ok(args)
+	}
+
+	/// A generated control whose only action is changing its own label.
+	pub fn is_rename_only(&self) -> bool {
+		self.generated
+			&& self.entry_type == Some(EntryType::Button)
+			&& self.rename.is_some()
+			&& self
+				.exec
+				.as_deref()
+				.is_none_or(|exec| exec.trim().is_empty())
+	}
+
+	/// Whether the user may remove this item through the folder.
+	pub fn is_destroyable(&self) -> bool {
+		self.destroy.is_some() || !self.generated
+	}
+
+	/// Expand a provider command: `%v` is the new value, `%n` the display
+	/// name, `%p` the item path, `%k` the entry path and `%c` the name.
+	fn hook_args(
+		&self,
+		command: &str,
+		value: Option<&str>,
+	) -> Result<Vec<String>, String> {
+		expand_hook(
+			command,
+			value,
+			self.name.as_deref().unwrap_or_default(),
+			&self.path,
+		)
+	}
+
+	pub fn rename_args(&self, new_name: &str) -> Result<Vec<String>, String> {
+		let command = self
+			.rename
+			.as_deref()
+			.ok_or_else(|| String::from("entry has no Rename command"))?;
+		self.hook_args(command, Some(new_name))
+	}
+
+	pub fn destroy_args(&self) -> Result<Vec<String>, String> {
+		let command = self
+			.destroy
+			.as_deref()
+			.ok_or_else(|| String::from("entry has no Destroy command"))?;
+		self.hook_args(command, None)
+	}
+
+	pub fn reset_args(&self) -> Result<Vec<String>, String> {
+		let command = self
+			.reset
+			.as_deref()
+			.ok_or_else(|| String::from("entry has no Reset command"))?;
+		self.hook_args(command, None)
+	}
+
+	pub fn refresh_args(&self) -> Result<Vec<String>, String> {
+		let command = self
+			.refresh
+			.as_deref()
+			.ok_or_else(|| String::from("entry has no Refresh command"))?;
+		self.hook_args(command, None)
 	}
 
 	/// The icon this entry asks for, resolved against the entry file.
@@ -287,6 +406,25 @@ fn value_int(values: &std::collections::HashMap<String, ConfigValue>, key: &str)
 	}
 }
 
+/// The `NumberNLabel`/`NumberNValue`/`NumberNMin`/`NumberNMax` fields a
+/// `Type=Number` provider writes.
+fn number_fields(values: &std::collections::HashMap<String, ConfigValue>) -> Vec<NumberField> {
+	let count = value_int(values, "NumberCount").unwrap_or(0).clamp(0, 16);
+	(1..=count)
+		.filter_map(|index| {
+			let label = value_string(values.get(&format!("Number{index}Label")))?;
+			let value = value_int(values, &format!("Number{index}Value"))?;
+			Some(NumberField {
+				label,
+				value,
+				min: value_int(values, &format!("Number{index}Min")).unwrap_or(value),
+				max: value_int(values, &format!("Number{index}Max")).unwrap_or(value),
+				default: value_int(values, &format!("Number{index}Default")).unwrap_or(value),
+			})
+		})
+		.collect()
+}
+
 fn number_value(values: &std::collections::HashMap<String, ConfigValue>) -> String {
 	let count = value_int(values, "NumberCount").unwrap_or(0).clamp(0, 16);
 	(1..=count)
@@ -315,7 +453,47 @@ fn diagnostic(path: &Path, message: impl Into<String>) -> ConfigDiagnostic {
 	}
 }
 
-fn tokenize_exec(exec: &str) -> Result<Vec<String>, String> {
+/// Expand a provider command with `%v`, `%n`, `%p`, `%k`, `%c` and `%%`.
+pub fn expand_hook(
+	command: &str,
+	value: Option<&str>,
+	name: &str,
+	path: &Path,
+) -> Result<Vec<String>, String> {
+	let tokens = tokenize_exec(command)?;
+	let path = path.to_string_lossy();
+	let mut args = Vec::new();
+	for token in tokens {
+		let mut expanded = String::new();
+		let mut chars = token.chars();
+		while let Some(character) = chars.next() {
+			if character != '%' {
+				expanded.push(character);
+				continue;
+			}
+			match chars.next() {
+				Some('%') => expanded.push('%'),
+				Some('v') => expanded.push_str(value.unwrap_or_default()),
+				Some('n') => expanded.push_str(name),
+				Some('p') => expanded.push_str(&path),
+				Some('k') => expanded.push_str(&path),
+				Some('c') => expanded.push_str(name),
+				Some(other) => {
+					return Err(format!("unsupported field code %{other} in command"));
+				}
+				None => {
+					return Err(String::from("command ends with an incomplete field code"));
+				}
+			}
+		}
+		if !expanded.is_empty() {
+			args.push(expanded);
+		}
+	}
+	Ok(args)
+}
+
+pub(crate) fn tokenize_exec(exec: &str) -> Result<Vec<String>, String> {
 	let mut args = Vec::new();
 	let mut token = String::new();
 	let mut chars = exec.chars().peekable();
@@ -385,6 +563,123 @@ mod tests {
 		assert_eq!(entry.entry_type, Some(EntryType::Application));
 		assert_eq!(entry.exec.as_deref(), Some("ride %f"));
 		assert!(!entry.hidden);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn reads_terminal_launch_fields() {
+		let root = window("terminal");
+		let path = root.join("micro.desktop");
+		std::fs::write(
+			&path,
+			"[Desktop Entry]\nType=Application\nName=Micro\nExec=micro %F\n\
+			 Terminal=true\nTerminalOptions=--hold\n",
+		)
+		.unwrap();
+		let entry = Entry::read(&path, FsKind::File).unwrap();
+		assert!(entry.terminal);
+		assert_eq!(entry.terminal_options.as_deref(), Some("--hold"));
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn reads_provider_action_commands() {
+		let root = window("provider-actions");
+		let path = root.join("device.desktop");
+		std::fs::write(
+			&path,
+			"[Desktop Entry]\nType=Button\nName=Device\nGenerated=true\n\
+			 Rename=provider rename %v %n %p\n\
+			 Destroy=provider destroy %n %p\n\
+			 Reset=provider reset %p\n\
+			 Refresh=provider refresh %p\n",
+		)
+		.unwrap();
+		let entry = Entry::read(&path, FsKind::File).unwrap();
+		assert!(entry.generated);
+		assert_eq!(
+			entry.rename_args("New name").unwrap(),
+			vec![
+				"provider",
+				"rename",
+				"New name",
+				"Device",
+				path.to_string_lossy().as_ref()
+			]
+		);
+		assert_eq!(
+			entry.destroy_args().unwrap(),
+			vec!["provider", "destroy", "Device", path.to_string_lossy().as_ref()]
+		);
+		assert_eq!(
+			entry.reset_args().unwrap(),
+			vec!["provider", "reset", path.to_string_lossy().as_ref()]
+		);
+		assert_eq!(
+			entry.refresh_args().unwrap(),
+			vec!["provider", "refresh", path.to_string_lossy().as_ref()]
+		);
+		assert!(entry.is_destroyable());
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn a_generated_button_without_exec_is_rename_only() {
+		let root = window("rename-only");
+		let path = root.join("name.desktop");
+		std::fs::write(
+			&path,
+			"[Desktop Entry]\nType=Button\nName=User\nGenerated=true\n\
+			 Rename=provider rename %v\n",
+		)
+		.unwrap();
+		assert!(Entry::read(&path, FsKind::File).unwrap().is_rename_only());
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn control_commands_expand_toggle_and_number_values() {
+		let root = window("controls");
+		let toggle = root.join("mute.desktop");
+		std::fs::write(
+			&toggle,
+			"[Desktop Entry]\nType=Toggle\nName=Mute\nExec=provider %v\nToggle=true\n",
+		)
+		.unwrap();
+		let entry = Entry::read(&toggle, FsKind::File).unwrap();
+		assert_eq!(entry.control_args(&[]).unwrap(), vec!["provider", "off"]);
+		let number = root.join("volume.desktop");
+		std::fs::write(
+			&number,
+			"[Desktop Entry]\nType=Number\nName=Volume\nExec=set %1 %2\n",
+		)
+		.unwrap();
+		let entry = Entry::read(&number, FsKind::File).unwrap();
+		assert_eq!(
+			entry.control_args(&[3, 7]).unwrap(),
+			vec!["set", "3", "7"]
+		);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn reads_number_control_fields() {
+		let root = window("numbers");
+		let path = root.join("volume.desktop");
+		std::fs::write(
+			&path,
+			"[Desktop Entry]\nType=Number\nName=Volume\nNumberCount=2\n\
+			 Number1Label=Left\nNumber1Value=3\nNumber1Min=0\nNumber1Max=10\n\
+			 Number2Label=Right\nNumber2Value=7\nNumber2Min=0\nNumber2Max=10\n",
+		)
+		.unwrap();
+		let entry = Entry::read(&path, FsKind::File).unwrap();
+		assert_eq!(entry.number_fields.len(), 2);
+		assert_eq!(entry.number_fields[0].label, "Left");
+		assert_eq!(entry.number_fields[0].value, 3);
+		assert_eq!(entry.number_fields[0].max, 10);
+		assert_eq!(entry.number_fields[1].label, "Right");
+		assert_eq!(entry.number_fields[1].value, 7);
 		std::fs::remove_dir_all(root).unwrap();
 	}
 

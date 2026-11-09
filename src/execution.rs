@@ -6,6 +6,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::config_parser::{ConfigParser, ConfigValue};
 use crate::entry::{Entry, EntryType};
 use crate::item::FsKind;
 
@@ -28,6 +29,18 @@ pub struct AppId(pub String);
 pub enum LaunchRequest {
 	Item { path: PathBuf },
 	App { path: PathBuf, app: AppId },
+	/// Run a `Type=Toggle` or `Type=Number` provider command. An empty
+	/// `values` means the toggle target (on/off); otherwise `%1`, `%2`, …
+	/// are replaced by the dialog values.
+	Control { path: PathBuf, values: Vec<i64> },
+	/// Run a folder's `[Radio] Exec` after a choice is selected. `%v`, `%n`
+	/// and `%p` expand to the value, display name and path.
+	Radio {
+		exec: String,
+		value: String,
+		name: String,
+		path: PathBuf,
+	},
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -86,6 +99,9 @@ pub struct SpawnRequest {
 	pub animation: String,
 	pub screen: Option<String>,
 	pub through_wrapper: bool,
+	/// Whether this launch represents a running application, rather than a
+	/// short-lived provider command.
+	pub track_active: bool,
 }
 
 pub trait Spawner: Send + Sync {
@@ -374,7 +390,85 @@ impl Execution {
 				};
 				self.entry_request(&entry, &entry_path, Some(&path))
 			}
+			LaunchRequest::Control { path, values } => {
+				let directory = path.is_dir();
+				let entry_path = if directory {
+					path.join(".directory")
+				} else {
+					path.clone()
+				};
+				let kind = if directory {
+					FsKind::Directory
+				} else {
+					FsKind::File
+				};
+				let Some(entry) = Entry::read(&entry_path, kind) else {
+					return Err(LaunchError::NotExecutable(path));
+				};
+				self.control_request(&entry, &path, &values)
+			}
+			LaunchRequest::Radio {
+				exec,
+				value,
+				name,
+				path,
+			} => {
+				let tokens = crate::entry::tokenize_exec(&exec).map_err(LaunchError::Exec)?;
+				let Some(program) = tokens.first().cloned() else {
+					return Err(LaunchError::Exec(String::from("empty Exec")));
+				};
+				let item = path.to_string_lossy().into_owned();
+				let args = tokens[1..]
+					.iter()
+					.map(|argument| {
+						argument
+							.replace("%v", &value)
+							.replace("%n", &name)
+							.replace("%p", &item)
+					})
+					.collect();
+				Ok(SpawnRequest {
+					program,
+					args,
+					item: path.clone(),
+					name,
+					cwd: path.parent().map(Path::to_path_buf),
+					animation: String::new(),
+					screen: self.screen.clone(),
+					through_wrapper: false,
+					track_active: false,
+				})
+			}
 		}
+	}
+
+	fn terminal_command(&self) -> (String, Vec<String>) {
+		if let Some(value) = std::env::var("TERMINAL").ok().filter(|value| !value.trim().is_empty())
+			&& let Some((program, args)) = terminal_config_command(&value)
+			&& self.spawner.command_exists(&program)
+		{
+			return (program, args);
+		}
+		if let Some(value) = kde_terminal_application()
+			&& let Some((program, args)) = terminal_config_command(&value)
+			&& self.spawner.command_exists(&program)
+		{
+			return (program, args);
+		}
+		for candidate in ["konsole", "x-terminal-emulator", "xterm"] {
+			if self.spawner.command_exists(candidate) {
+				return (candidate.to_string(), Vec::new());
+			}
+		}
+		(String::from("konsole"), Vec::new())
+	}
+
+	fn terminal_request(&self, program: &str, args: &[String], options: Option<&str>) -> (String, Vec<String>) {
+		let (terminal, terminal_args) = self.terminal_command();
+		let options: Vec<String> = options
+			.map(|value| value.split_whitespace().map(String::from).collect())
+			.unwrap_or_default();
+		terminal_launch(&terminal, terminal_args, &options, program, args)
 	}
 
 	fn entry_request(
@@ -404,13 +498,22 @@ impl Execution {
 		let Some(program) = args.first().cloned() else {
 			return Err(LaunchError::Exec(String::from("empty Exec")));
 		};
+		let (program, args) = if entry.terminal {
+			self.terminal_request(
+				&program,
+				&args[1..],
+				entry.terminal_options.as_deref(),
+			)
+		} else {
+			(program, args[1..].to_vec())
+		};
 		let through_wrapper = matches!(
 			entry.entry_type,
 			Some(EntryType::Application | EntryType::File | EntryType::Link)
 		);
 		Ok(SpawnRequest {
 			program,
-			args: args[1..].to_vec(),
+			args,
 			item: file.unwrap_or_else(|| item.to_path_buf()),
 			name: entry
 				.name
@@ -424,6 +527,41 @@ impl Execution {
 			animation: entry.launch_animation.clone().unwrap_or_default(),
 			screen: self.screen.clone(),
 			through_wrapper,
+			track_active: true,
+		})
+	}
+
+	fn control_request(
+		&self,
+		entry: &Entry,
+		item: &Path,
+		values: &[i64],
+	) -> Result<SpawnRequest, LaunchError> {
+		let args = entry
+			.control_args(values)
+			.map_err(LaunchError::Exec)?;
+		let Some(program) = args.first().cloned() else {
+			return Err(LaunchError::Exec(String::from("empty Exec")));
+		};
+		Ok(SpawnRequest {
+			program,
+			args: args[1..].to_vec(),
+			item: item.to_path_buf(),
+			name: entry
+				.name
+				.clone()
+				.or_else(|| {
+					item.file_name()
+						.map(|name| name.to_string_lossy().into_owned())
+				})
+				.unwrap_or_default(),
+			cwd: entry.path.parent().map(Path::to_path_buf),
+			animation: String::new(),
+			screen: self.screen.clone(),
+			// Controls talk to their provider directly; the execution wrapper
+			// is for launching applications.
+			through_wrapper: false,
+			track_active: false,
 		})
 	}
 
@@ -436,7 +574,7 @@ impl Execution {
 	fn start(&mut self, request: SpawnRequest, wrapper: Option<&str>) -> Result<(), LaunchError> {
 		self.spawner.spawn(wrapper, &request)?;
 		let id = self.next_launch_id();
-		if !request.item.as_os_str().is_empty() {
+		if request.track_active && !request.item.as_os_str().is_empty() {
 			self.active.insert(
 				request.item.clone(),
 				ActiveLaunch {
@@ -453,6 +591,78 @@ impl Execution {
 		self.next_id += 1;
 		id
 	}
+}
+
+/// Wrap a command in a terminal emulator. `TerminalOptions` are inserted
+/// before the emulator's command separator, as KDE's terminal launcher does.
+fn terminal_launch(
+	terminal: &str,
+	terminal_args: Vec<String>,
+	options: &[String],
+	program: &str,
+	args: &[String],
+) -> (String, Vec<String>) {
+	let mut arguments = terminal_args;
+	arguments.extend(options.iter().cloned());
+	let name = Path::new(terminal)
+		.file_name()
+		.and_then(|name| name.to_str())
+		.unwrap_or(terminal);
+	match name {
+		"gnome-terminal" | "kgx" | "ptyxis" => arguments.push(String::from("--")),
+		"wezterm" => {
+			arguments.push(String::from("start"));
+			arguments.push(String::from("--"));
+		}
+		_ => arguments.push(String::from("-e")),
+	}
+	arguments.push(String::from(program));
+	arguments.extend(args.iter().cloned());
+	(terminal.to_string(), arguments)
+}
+
+/// KDE's configured terminal, from `$XDG_CONFIG_HOME/kdeglobals` over the
+/// system defaults. `TerminalApplication` is the command; older installs used
+/// `TerminalService`, which can be a desktop file id.
+fn kde_terminal_application() -> Option<String> {
+	let mut files = Vec::new();
+	let system_dirs = std::env::var_os("XDG_CONFIG_DIRS")
+		.map(|dirs| std::env::split_paths(&dirs).collect::<Vec<_>>())
+		.filter(|dirs| !dirs.is_empty())
+		.unwrap_or_else(|| vec![PathBuf::from("/etc/xdg")]);
+	for dir in system_dirs {
+		files.push(dir.join("kdeglobals"));
+	}
+	if let Some(config) = dirs::config_dir() {
+		files.push(config.join("kdeglobals"));
+	}
+	let paths: Vec<&Path> = files.iter().map(PathBuf::as_path).collect();
+	let parsed = ConfigParser::parse_files(&paths);
+	let general = parsed.sections.get("General")?;
+	for key in ["TerminalApplication", "TerminalService"] {
+		if let Some(ConfigValue::String(value)) = general.get(key) {
+			let value = value.trim();
+			if !value.is_empty() {
+				return Some(value.to_string());
+			}
+		}
+	}
+	None
+}
+
+fn terminal_config_command(value: &str) -> Option<(String, Vec<String>)> {
+	let value = value.trim();
+	if value.is_empty() {
+		return None;
+	}
+	if value.ends_with(".desktop") {
+		let stem = Path::new(value).file_stem()?.to_str()?;
+		// `org.kde.konsole.desktop` names the `konsole` executable.
+		let program = stem.rsplit('.').next().unwrap_or(stem);
+		return Some((program.to_string(), Vec::new()));
+	}
+	let (program, args) = split_command(value);
+	program.map(|program| (program, args))
 }
 
 fn split_command(command: &str) -> (Option<String>, Vec<String>) {
@@ -580,6 +790,71 @@ mod tests {
 	}
 
 	#[test]
+	fn a_control_runs_its_provider_without_the_wrapper() {
+		let root = tree("control");
+		let entry = root.join("volume.desktop");
+		std::fs::write(
+			&entry,
+			"[Desktop Entry]\nType=Number\nName=Volume\nExec=set %1 %2\n",
+		)
+		.unwrap();
+		let spawner = Arc::new(FakeSpawner {
+			exists: true,
+			..FakeSpawner::default()
+		});
+		let mut execution = Execution::new(
+			Some(ExecutionWrapper {
+				command: String::from("wrapper"),
+			}),
+			None,
+			spawner.clone(),
+			Arc::new(SystemClock),
+		);
+		let outcome = execution
+			.request(LaunchRequest::Control {
+				path: entry,
+				values: vec![3, 7],
+			})
+			.unwrap();
+		assert_eq!(outcome, LaunchOutcome::Started);
+		let spawned = spawner.spawned.lock().unwrap();
+		assert_eq!(spawned.len(), 1);
+		assert!(!spawned[0].1.through_wrapper);
+		assert!(!spawned[0].1.track_active);
+		assert_eq!(spawned[0].1.program, "set");
+		assert_eq!(spawned[0].1.args, vec!["3", "7"]);
+		assert!(execution.active_items().is_empty());
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn a_radio_runs_the_folder_exec_with_placeholders() {
+		let root = tree("radio");
+		let choice = root.join("one");
+		std::fs::create_dir_all(&choice).unwrap();
+		let spawner = Arc::new(FakeSpawner::default());
+		let mut execution = Execution::new(None, None, spawner.clone(), Arc::new(SystemClock));
+		let outcome = execution
+			.request(LaunchRequest::Radio {
+				exec: String::from("provider %v %n %p"),
+				value: String::from("one"),
+				name: String::from("One"),
+				path: choice.clone(),
+			})
+			.unwrap();
+		assert_eq!(outcome, LaunchOutcome::Started);
+		let spawned = spawner.spawned.lock().unwrap();
+		assert_eq!(spawned.len(), 1);
+		assert_eq!(spawned[0].1.program, "provider");
+		assert_eq!(
+			spawned[0].1.args,
+			vec!["one", "One", choice.to_string_lossy().as_ref()]
+		);
+		assert!(!spawned[0].1.track_active);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
 	fn a_wrapper_can_hold_a_launch_for_confirmation() {
 		let root = tree("wrapper");
 		let entry = app_entry(&root);
@@ -608,6 +883,37 @@ mod tests {
 		let spawned = spawner.spawned.lock().unwrap();
 		assert_eq!(spawned[0].0.as_deref(), Some("wrapper"));
 		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn terminal_launch_uses_the_emulator_separator() {
+		let (program, args) = terminal_launch(
+			"konsole",
+			Vec::new(),
+			&[String::from("--hold")],
+			"micro",
+			&[String::from("notes.txt")],
+		);
+		assert_eq!(program, "konsole");
+		assert_eq!(args, vec!["--hold", "-e", "micro", "notes.txt"]);
+
+		let (_, args) = terminal_launch(
+			"gnome-terminal",
+			Vec::new(),
+			&[],
+			"micro",
+			&[],
+		);
+		assert_eq!(args, vec!["--", "micro"]);
+
+		let (_, args) = terminal_launch(
+			"wezterm",
+			Vec::new(),
+			&[],
+			"micro",
+			&[],
+		);
+		assert_eq!(args, vec!["start", "--", "micro"]);
 	}
 
 	#[test]

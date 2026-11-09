@@ -325,6 +325,7 @@ impl RadioOnly {
 pub enum ListColumn {
 	Title,
 	Filename,
+	Comment,
 	Size,
 	Modified,
 	Created,
@@ -337,6 +338,7 @@ impl ListColumn {
 		match self {
 			Self::Title => "TITLE",
 			Self::Filename => "FILENAME",
+			Self::Comment => "COMMENT",
 			Self::Size => "SIZE",
 			Self::Modified => "MODIFIED",
 			Self::Created => "CREATED",
@@ -349,6 +351,7 @@ impl ListColumn {
 		match value.to_ascii_uppercase().as_str() {
 			"TITLE" => Some(Self::Title),
 			"FILENAME" => Some(Self::Filename),
+			"COMMENT" => Some(Self::Comment),
 			"SIZE" => Some(Self::Size),
 			"MODIFIED" => Some(Self::Modified),
 			"CREATED" => Some(Self::Created),
@@ -552,7 +555,14 @@ pub fn grid_spec(config: &Config, request: &ViewRequest) -> GridSpec {
 		GridMode::Lines => {
 			let lines = config.lines.clamp(1, 8) as f64;
 			let cell = (main / lines - gap).min(main / 2.0 - gap);
-			let icon = (cell - padding).clamp(16.0, 256.0);
+			// Labels below the icon take two lines, so leave them room by
+			// trimming the derived icon a little.
+			let label_trim = if config.show_labels && !beside {
+				small * 2.0
+			} else {
+				0.0
+			};
+			let icon = (cell - padding - label_trim).clamp(16.0, 256.0);
 			(
 				GridSizing::FixedLines { lines: lines as u8 },
 				lines as u8,
@@ -566,7 +576,11 @@ pub fn grid_spec(config: &Config, request: &ViewRequest) -> GridSpec {
 				(config.grid_size as f64).clamp(16.0, 256.0)
 			};
 			let pitch = icon + padding + gap;
-			let lines = (((main + gap) / pitch).floor() as i64).clamp(1, 8) as u8;
+			// The line count is derived from the viewport, so a small fixed
+			// icon can need far more than the eight lines the explicit Lines
+			// mode allows. Capping it at eight left the block centred in a
+			// wide pane with empty bands on both sides.
+			let lines = (((main + gap) / pitch).floor() as i64).clamp(1, 255) as u8;
 			(
 				GridSizing::FixedIcon {
 					icon_size: icon as u16,
@@ -629,8 +643,13 @@ mod tests {
 	}
 
 	#[test]
-	fn fixed_lines_keeps_the_line_count() {
-		let config = config(ConfigKey::Lines, ConfigValue::Int(4));
+	fn comment_is_a_list_column() {
+		assert_eq!(ListColumn::from_key("comment"), Some(ListColumn::Comment));
+		assert_eq!(ListColumn::Comment.as_key(), "COMMENT");
+	}
+
+	#[test]
+	fn fixed_lines_keeps_the_line_count() {		let config = config(ConfigKey::Lines, ConfigValue::Int(4));
 		let spec = grid_spec(&config, &request(400.0, 300.0));
 		assert_eq!(spec.lines, 4);
 		assert_eq!(spec.sizing, GridSizing::FixedLines { lines: 4 });
@@ -650,6 +669,19 @@ mod tests {
 		assert_eq!(spec.sizing, GridSizing::FixedIcon { icon_size: 64 });
 		assert_eq!(spec.icon_size, 64.0);
 		assert!(spec.lines >= 1);
+	}
+
+	#[test]
+	fn fixed_icon_fills_a_wide_viewport() {
+		let mut config = Config::default();
+		config
+			.set(ConfigKey::GridMode, ConfigValue::Str("SIZE".into()))
+			.unwrap();
+		config
+			.set(ConfigKey::GridSize, ConfigValue::Int(32))
+			.unwrap();
+		let spec = grid_spec(&config, &request(1280.0, 720.0));
+		assert!(spec.lines > 8, "wide views need more than eight columns");
 	}
 
 	#[test]

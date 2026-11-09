@@ -36,6 +36,21 @@ impl Descriptor {
 			crate::item::IconRef::Theme(icon.to_string())
 		})
 	}
+
+	/// Expand this descriptor's `Unmount=` command for `path`.
+	pub fn unmount_args(&self, path: &Path) -> Result<Vec<String>, String> {
+		let command = self
+			.unmount
+			.as_deref()
+			.filter(|command| !command.trim().is_empty())
+			.ok_or_else(|| String::from("descriptor has no Unmount command"))?;
+		crate::entry::expand_hook(
+			command,
+			None,
+			self.name.as_deref().unwrap_or_default(),
+			path,
+		)
+	}
 }
 
 static CACHE: LazyLock<Mutex<Option<(Instant, HashMap<PathBuf, Descriptor>)>>> =
@@ -158,6 +173,20 @@ mod tests {
 			Some(crate::item::IconRef::Theme(String::from(
 				"media-flash-sd-mmc"
 			)))
+		);
+	}
+
+	#[test]
+	fn a_descriptor_expands_its_unmount_command() {
+		let (target, descriptor) = parse(
+			"[Desktop Entry]\nType=Directory\nPath=/mnt/sdcard\nName=SD Card\n\
+			 Unmount=provider unmount %n %p\n",
+			Path::new("/usr/share/hishell/directories/sd.desktop"),
+		)
+		.unwrap();
+		assert_eq!(
+			descriptor.unmount_args(&target).unwrap(),
+			vec!["provider", "unmount", "SD Card", "/mnt/sdcard"]
 		);
 	}
 
