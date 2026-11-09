@@ -571,6 +571,10 @@ impl Engine {
 		self.history.entries()
 	}
 
+	pub fn focus_state(&self) -> &Focus {
+		&self.focus
+	}
+
 	pub fn focus(&self) -> Option<ItemId> {
 		self.focus.item()
 	}
