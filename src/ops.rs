@@ -380,6 +380,15 @@ fn copy_item(
 	if cancel.load(Ordering::Relaxed) {
 		return Ok(());
 	}
+	if source == target {
+		return Ok(());
+	}
+	if source.is_dir() && target.starts_with(source) {
+		return Err(OpError::InvalidName(format!(
+			"cannot copy {} into itself",
+			source.display()
+		)));
+	}
 	if let Some(parent) = target.parent() {
 		fs::create_dir_all(parent).map_err(io_error)?;
 	}
@@ -424,6 +433,15 @@ fn move_item(
 	options: CopyOptions,
 	cancel: &AtomicBool,
 ) -> Result<(), OpError> {
+	if source == target {
+		return Ok(());
+	}
+	if source.is_dir() && target.starts_with(source) {
+		return Err(OpError::InvalidName(format!(
+			"cannot move {} into itself",
+			source.display()
+		)));
+	}
 	if let Some(parent) = target.parent() {
 		fs::create_dir_all(parent).map_err(io_error)?;
 	}
@@ -666,6 +684,45 @@ mod tests {
 			&AtomicBool::new(false),
 		);
 		assert_eq!(outcome.failed.len(), 1);
+		fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn moving_a_file_back_to_its_own_folder_keeps_it() {
+		let root = tree("move-self");
+		let source = root.join("a.txt");
+		fs::write(&source, b"keep me").unwrap();
+		run(&Op::Move {
+			sources: vec![source.clone()],
+			dest: root.clone(),
+			options: CopyOptions {
+				overwrite: Overwrite::Replace,
+				..CopyOptions::default()
+			},
+		}, &AtomicBool::new(false));
+		assert_eq!(fs::read(&source).unwrap(), b"keep me");
+		fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn moving_a_folder_into_itself_keeps_it() {
+		let root = tree("move-into-self");
+		let folder = root.join("folder");
+		fs::create_dir_all(folder.join("inner")).unwrap();
+		fs::write(folder.join("inner/a.txt"), b"keep me").unwrap();
+		let outcome = run(
+			&Op::Move {
+				sources: vec![folder.clone()],
+				dest: folder.clone(),
+				options: CopyOptions {
+					overwrite: Overwrite::Replace,
+					..CopyOptions::default()
+				},
+			},
+			&AtomicBool::new(false),
+		);
+		assert_eq!(outcome.failed.len(), 1);
+		assert_eq!(fs::read(folder.join("inner/a.txt")).unwrap(), b"keep me");
 		fs::remove_dir_all(root).unwrap();
 	}
 

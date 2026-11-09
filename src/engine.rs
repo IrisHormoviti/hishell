@@ -1340,6 +1340,12 @@ mod tests {
 		let mut engine = Engine::open(&path).unwrap();
 		engine
 			.dispatch(Command::SetConfig {
+				key: ConfigKey::GridMode,
+				value: ConfigValue::Str(String::from("LINES")),
+			})
+			.unwrap();
+		engine
+			.dispatch(Command::SetConfig {
 				key: ConfigKey::Lines,
 				value: ConfigValue::Int(2),
 			})
