@@ -1,6 +1,8 @@
 //! MIME detection and themed icon names.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use crate::item::IconRef;
 
@@ -9,10 +11,59 @@ pub fn mime_for_path(path: &Path) -> Option<String> {
 	if let Some(mime) = mime_guess::from_path(path).first_raw() {
 		return Some(mime.to_string());
 	}
+	// `mime_guess` only knows common extensions. The shared MIME database
+	// covers the rest (disc images such as `.rvz`, emulator formats, ...), and
+	// is the same source the desktop uses for "Open with".
+	if let Some(mime) = shared_mime_for_extension(path) {
+		return Some(mime);
+	}
 	infer::get_from_path(path)
 		.ok()
 		.flatten()
 		.map(|kind| kind.mime_type().to_string())
+}
+
+/// Look up an extension in `/usr/share/mime/globs2`, cached for the process.
+fn shared_mime_for_extension(path: &Path) -> Option<String> {
+	static GLOBS: OnceLock<HashMap<String, String>> = OnceLock::new();
+	let globs = GLOBS.get_or_init(|| {
+		let text = std::fs::read_to_string("/usr/share/mime/globs2").unwrap_or_default();
+		parse_globs2(&text)
+	});
+	let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+	globs.get(&extension).cloned()
+}
+
+/// Parse the `weight:mime:glob` lines of `globs2` into extension -> MIME.
+/// Only simple `*.ext` globs are kept; the highest weight wins.
+fn parse_globs2(text: &str) -> HashMap<String, String> {
+	let mut best: HashMap<String, (u32, String)> = HashMap::new();
+	for line in text.lines() {
+		let line = line.trim();
+		if line.is_empty() || line.starts_with('#') {
+			continue;
+		}
+		let mut parts = line.splitn(3, ':');
+		let (Some(weight), Some(mime), Some(glob)) = (parts.next(), parts.next(), parts.next())
+		else {
+			continue;
+		};
+		let Ok(weight) = weight.parse::<u32>() else {
+			continue;
+		};
+		let Some(extension) = glob.strip_prefix("*.") else {
+			continue;
+		};
+		if extension.is_empty() || !extension.chars().all(|c| c.is_ascii_alphanumeric()) {
+			continue;
+		}
+		let key = extension.to_ascii_lowercase();
+		let entry = best.entry(key).or_insert_with(|| (weight, mime.to_string()));
+		if weight > entry.0 {
+			*entry = (weight, mime.to_string());
+		}
+	}
+	best.into_iter().map(|(key, (_, mime))| (key, mime)).collect()
 }
 
 /// The themed icon name for a path.
@@ -63,7 +114,11 @@ pub fn for_mime(mime: &str) -> IconRef {
 		| "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
 			"x-office-presentation"
 		}
-		_ => "text-x-generic",
+		// The freedesktop convention: the icon name is the MIME type with
+		// "/" replaced by "-". The theme lookup falls back to a generic file
+		// icon when the theme has no such icon.
+		"application/octet-stream" | "" => "text-x-generic",
+		other => return IconRef::Theme(other.replace('/', "-")),
 	};
 	IconRef::Theme(String::from(name))
 }
@@ -88,6 +143,22 @@ mod tests {
 		assert_eq!(theme("application/zip"), "package-x-generic");
 		assert_eq!(theme("text/html"), "text-html");
 		assert_eq!(theme("application/octet-stream"), "text-x-generic");
+		// Unknown application types keep their own themed icon name.
+		assert_eq!(theme("application/x-gamecube-rom"), "application-x-gamecube-rom");
+	}
+
+	#[test]
+	fn shared_mime_globs_pick_the_heaviest_extension() {
+		let globs = parse_globs2(
+			"50:application/x-gamecube-rom:*.rvz\n\
+			 50:application/x-rvz-image:*.rvz\n\
+			 60:application/x-wii-rom:*.rvz\n\
+			 50:image/png:*.png\n\
+			 50:application/pdf:*.[pP][dD][fF]\n",
+		);
+		assert_eq!(globs.get("rvz").map(String::as_str), Some("application/x-wii-rom"));
+		assert_eq!(globs.get("png").map(String::as_str), Some("image/png"));
+		assert!(!globs.contains_key("pdf"));
 	}
 
 	#[test]

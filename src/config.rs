@@ -432,7 +432,7 @@ impl Config {
 		match self.grid_mode {
 			GridMode::Lines => crate::view::GridSizing::FixedLines {
 				lines: if self.lines == 0 {
-					4
+					5
 				} else {
 					self.lines.clamp(1, 8)
 				},

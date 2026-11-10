@@ -896,6 +896,16 @@ impl Engine {
 			.map(|folder| folder.order().to_vec())
 			.unwrap_or_default();
 		self.focus.set_order(self.focus.pane(), order.clone());
+		// Grouped and stashed views do not fill a plain row-major grid: their
+		// slot cells can jump columns and rows. Register the cells the view
+		// actually laid out so Left/Right/Up/Down follow the picture instead
+		// of a naive `lines`-wide grid.
+		if let Some(positions) = self.view_positions(&order) {
+			self.focus.apply(FocusCommand::SetPositions {
+				pane: self.focus.pane(),
+				positions,
+			});
+		}
 		match command {
 			FocusCommand::First => {
 				self.focus.first(&order);
@@ -942,6 +952,19 @@ impl Engine {
 			effects: Vec::new(),
 			job: None,
 		}
+	}
+
+	/// Slot cells in the order the focus engine follows, or None when the
+	/// last view does not describe every item (file views, stale order).
+	fn view_positions(&self, order: &[ItemId]) -> Option<Vec<(i32, i32)>> {
+		let last_view = self.last_view.borrow();
+		let view = last_view.as_ref()?;
+		let mut positions = Vec::with_capacity(order.len());
+		for item in order {
+			let slot = view.slots.iter().find(|slot| slot.item == *item)?;
+			positions.push((slot.cell.0 as i32, slot.cell.1 as i32));
+		}
+		(!positions.is_empty()).then_some(positions)
 	}
 
 	fn focus_columns(&self) -> usize {
@@ -1239,6 +1262,8 @@ impl std::fmt::Debug for Engine {
 mod tests {
 	use super::*;
 	use crate::action::MenuKind;
+	use crate::focus::Direction;
+	use crate::view::PaneId;
 	use crate::config::ConfigKey;
 
 	struct AcceptAll;
@@ -1977,6 +2002,68 @@ mod tests {
 		}
 		assert!(!text.exists());
 		assert!(image.exists());
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn focus_moves_along_the_grouped_cells() {
+		let path = temp_folder("group-focus");
+		for (name, bytes) in [
+			("a.png", b"x".as_slice()),
+			("b.zip", b"x"),
+			("c.txt", b"x"),
+			("d.png", b"x"),
+			("e.zip", b"x"),
+		] {
+			std::fs::write(path.join(name), bytes).unwrap();
+		}
+		let mut engine = Engine::open(&path).unwrap();
+		engine
+			.dispatch(Command::SetConfig {
+				key: ConfigKey::Group,
+				value: ConfigValue::Str("TYPE".into()),
+			})
+			.unwrap();
+		let slots = engine.view(request()).folder_slots();
+		assert!(
+			slots.iter().any(|slot| slot.cell.0 > 0 && slot.cell.1 > 0),
+			"grouped layout should place items in lanes"
+		);
+		let pane = PaneId(0);
+		for index in 0..slots.len() {
+			let (column, row) = (slots[index].cell.0 as i32, slots[index].cell.1 as i32);
+			for direction in [
+				Direction::Right,
+				Direction::Left,
+				Direction::Down,
+				Direction::Up,
+			] {
+				engine
+					.dispatch(Command::Focus(FocusCommand::SetIndex {
+						pane,
+						index: index as i32,
+					}))
+					.unwrap();
+				engine
+					.dispatch(Command::Focus(FocusCommand::Move(direction)))
+					.unwrap();
+				let focus = engine.focus().unwrap();
+				let target = slots.iter().find(|slot| slot.item == focus).unwrap();
+				let (target_column, target_row) = (target.cell.0 as i32, target.cell.1 as i32);
+				let stayed = target_column == column && target_row == row;
+				let valid = stayed
+					|| match direction {
+						Direction::Right => target_column > column,
+						Direction::Left => target_column < column,
+						Direction::Down => target_row > row,
+						Direction::Up => target_row < row,
+					};
+				assert!(
+					valid,
+					"{direction:?} from ({column},{row}) landed on ({target_column},{target_row})"
+				);
+			}
+		}
 		std::fs::remove_dir_all(path).unwrap();
 	}
 

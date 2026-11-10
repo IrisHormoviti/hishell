@@ -558,7 +558,9 @@ pub fn grid_spec(config: &Config, request: &ViewRequest) -> GridSpec {
 			// Labels below the icon take two lines, so leave them room by
 			// trimming the derived icon a little.
 			let label_trim = if config.show_labels && !beside {
-				small * 2.0
+				// Two lines of labels sit below the icon; take that space out
+				// of the icon so the cell does not grow taller than the panel.
+				labels.height
 			} else {
 				0.0
 			};
@@ -645,7 +647,8 @@ mod tests {
 	}
 
 	#[test]
-	fn fixed_lines_keeps_the_line_count() {		let config = config(ConfigKey::Lines, ConfigValue::Int(4));
+	fn fixed_lines_keeps_the_line_count() {
+		let config = config(ConfigKey::Lines, ConfigValue::Int(4));
 		let spec = grid_spec(&config, &request(400.0, 300.0));
 		assert_eq!(spec.lines, 4);
 		assert_eq!(spec.sizing, GridSizing::FixedLines { lines: 4 });
@@ -653,11 +656,11 @@ mod tests {
 	}
 
 	#[test]
-	fn auto_lines_means_four() {
-		let config = Config::default();
+	fn auto_lines_means_five() {
+		let config = config(ConfigKey::Lines, ConfigValue::Int(0));
 		let spec = grid_spec(&config, &request(400.0, 300.0));
-		assert_eq!(spec.lines, 4);
-		assert_eq!(spec.sizing, GridSizing::FixedLines { lines: 4 });
+		assert_eq!(spec.lines, 5);
+		assert_eq!(spec.sizing, GridSizing::FixedLines { lines: 5 });
 	}
 
 	#[test]
