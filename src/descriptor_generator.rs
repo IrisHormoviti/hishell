@@ -90,6 +90,9 @@ struct Generator {
 pub struct Generated {
 	pub name: Option<String>,
 	pub icon: Option<String>,
+	/// The generated entry's `[Topscreen] IconArt=`, when it names one. This
+	/// is the bare label art, separate from the file view's card drawing.
+	pub icon_art: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -522,7 +525,38 @@ fn generate(job: &Job) -> Result<Generated, String> {
 	Ok(Generated {
 		name: entry.name.filter(|name| !name.trim().is_empty()),
 		icon,
+		icon_art: topscreen_icon_art(&out),
 	})
+}
+
+/// Read the generated entry's `[Topscreen] IconArt=`. The banner needs the
+/// bare art, but `Entry::read` only parses `[Desktop Entry]`, and the value is
+/// a local file path rather than an icon name.
+/// The bare label art for a source path, straight from its generated cache
+/// entry. Unlike the result map this also works for descriptors that were
+/// generated in an earlier session.
+pub fn cached_icon_art(src: &Path) -> Option<PathBuf> {
+	let out = cached(src)?;
+	topscreen_icon_art(&out)
+}
+
+pub(crate) fn topscreen_icon_art(entry: &Path) -> Option<PathBuf> {
+	let (sections, _) = crate::config_parser::ConfigParser::parse_file(entry);
+	let value = match sections.get("Topscreen")?.get("IconArt")? {
+		crate::config_parser::ConfigValue::String(value) => value.trim(),
+		_ => return None,
+	};
+	let value = value.strip_prefix("file://").unwrap_or(value);
+	if value.is_empty() {
+		return None;
+	}
+	let path = PathBuf::from(value);
+	let path = if path.is_absolute() {
+		path
+	} else {
+		entry.parent()?.join(path)
+	};
+	path.is_file().then_some(path)
 }
 
 fn next_job(st: &'static State) -> Job {

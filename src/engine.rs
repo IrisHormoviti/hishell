@@ -727,7 +727,9 @@ impl Engine {
 			},
 			ActionId::RENAME => match first {
 				Some(item) => Ok(outcome(vec![Effect::Prompt(Prompt::Rename {
-					suggested: item.title,
+					// Rename edits the on-disk name, which can differ from the
+					// display title supplied by a desktop entry or descriptor.
+					suggested: item.name,
 					path: item.path,
 				})])),
 				None => Ok(Outcome::default()),

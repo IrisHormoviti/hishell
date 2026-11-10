@@ -79,6 +79,9 @@ pub struct Item {
 	pub kind: ItemKind,
 	pub mime: Option<String>,
 	pub icon: IconRef,
+	/// Bare label art from a generated descriptor's `[Topscreen] IconArt=`.
+	/// The 3D banner uses this instead of the file view's card drawing.
+	pub model_icon: Option<PathBuf>,
 	pub is_symlink: bool,
 	pub is_dotfile: bool,
 	pub toggle_on: bool,

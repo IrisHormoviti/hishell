@@ -171,6 +171,22 @@ impl Folder {
 					FsKind::File => crate::icon::for_mime(mime.as_deref().unwrap_or_default()),
 				});
 			let is_stashed = name.starts_with('.') || entry.is_some_and(|entry| entry.no_display);
+			// A cached generated descriptor is read as a descriptor root, not
+			// as a fresh generator result, so both paths can carry the bare
+			// `[Topscreen] IconArt=` the 3D banner needs.
+			let model_icon = generated
+				.as_ref()
+				.and_then(|entry| entry.icon_art.clone())
+				.or_else(|| {
+					descriptor.as_ref().and_then(|descriptor| {
+						crate::descriptor_generator::topscreen_icon_art(&descriptor.source)
+					})
+				})
+				.or_else(|| {
+					(raw.fs_kind == FsKind::File)
+						.then(|| crate::descriptor_generator::cached_icon_art(&raw.path))
+						.flatten()
+				});
 
 			items.push(Item {
 				id: ItemId::for_path(&raw.path),
@@ -195,6 +211,7 @@ impl Folder {
 					.unwrap_or_else(|| ItemKind::from_fs(raw.fs_kind)),
 				mime,
 				icon,
+				model_icon,
 				is_symlink: raw.is_symlink,
 				is_dotfile: name.starts_with('.'),
 				toggle_on: entry.is_some_and(|entry| entry.toggle),

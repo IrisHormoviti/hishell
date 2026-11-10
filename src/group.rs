@@ -290,6 +290,7 @@ mod tests {
 			kind: ItemKind::File,
 			mime: Some(String::from("image/png")),
 			icon: IconRef::Theme(String::from("image-x-generic")),
+			model_icon: None,
 			is_symlink: false,
 			is_dotfile: false,
 			toggle_on: false,
