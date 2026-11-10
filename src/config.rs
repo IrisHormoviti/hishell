@@ -123,6 +123,7 @@ config_keys! {
 	ExecutionWrapper => "Layout", "ExecutionWrapper", Both, All, ConfigValue::Str(String::new());
 	Screen => "Layout", "Screen", Both, All, ConfigValue::Str(String::new());
 
+	NavigationType => "Folder Navigation", "NavigationType", Folder, View, ConfigValue::Str(String::from("IN_PLACE"));
 	CenterFocus => "Folder Navigation", "CenterFocus", Folder, View, ConfigValue::Bool(true);
 	SmoothScrolling => "Folder Navigation", "SmoothScrolling", Folder, View, ConfigValue::Bool(true);
 	OpenOnClick => "Folder Navigation", "OpenOnClick", Folder, View, ConfigValue::Bool(true);
@@ -132,6 +133,33 @@ config_keys! {
 	RadioOnly => "Radio", "Only", Folder, View, ConfigValue::Str(String::from("ALL"));
 	RadioSelected => "Radio", "Selected", Folder, View, ConfigValue::Str(String::new());
 	RadioExec => "Radio", "Exec", Folder, View, ConfigValue::Str(String::new());
+}
+
+/// How opening a folder changes the current view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum NavigationType {
+    /// Replace the view in place; Back walks the folder stack.
+    #[default]
+    InPlace,
+    /// Open a floating window rooted at the folder; Back closes it at its root.
+    Window,
+}
+
+impl NavigationType {
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::InPlace => "IN_PLACE",
+            Self::Window => "WINDOW",
+        }
+    }
+
+    pub fn from_key(value: &str) -> Option<Self> {
+        match value.to_ascii_uppercase().as_str() {
+            "IN_PLACE" | "INPLACE" => Some(Self::InPlace),
+            "WINDOW" => Some(Self::Window),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -209,6 +237,7 @@ pub struct Config {
 	pub execution_wrapper: String,
 	pub screen: String,
 
+	pub navigation_type: NavigationType,
 	pub center_focus: bool,
 	pub smooth_scrolling: bool,
 	pub open_on_click: bool,
@@ -259,6 +288,7 @@ impl Config {
 			show_shortcuts: true,
 			execution_wrapper: String::new(),
 			screen: String::new(),
+			navigation_type: NavigationType::InPlace,
 			center_focus: false,
 			smooth_scrolling: false,
 			open_on_click: true,
@@ -339,6 +369,7 @@ impl Config {
 			ConfigKey::ShowShortcuts => ConfigValue::Bool(self.show_shortcuts),
 			ConfigKey::ExecutionWrapper => ConfigValue::Str(self.execution_wrapper.clone()),
 			ConfigKey::Screen => ConfigValue::Str(self.screen.clone()),
+			ConfigKey::NavigationType => ConfigValue::Str(self.navigation_type.as_key().into()),
 			ConfigKey::CenterFocus => ConfigValue::Bool(self.center_focus),
 			ConfigKey::SmoothScrolling => ConfigValue::Bool(self.smooth_scrolling),
 			ConfigKey::OpenOnClick => ConfigValue::Bool(self.open_on_click),
@@ -410,6 +441,9 @@ impl Config {
 			ConfigKey::ShowShortcuts => self.show_shortcuts = boolean(key, value)?,
 			ConfigKey::ExecutionWrapper => self.execution_wrapper = string(key, value)?,
 			ConfigKey::Screen => self.screen = string(key, value)?,
+			ConfigKey::NavigationType => {
+				self.navigation_type = parse(key, value, NavigationType::from_key)?
+			}
 			ConfigKey::CenterFocus => self.center_focus = boolean(key, value)?,
 			ConfigKey::SmoothScrolling => self.smooth_scrolling = boolean(key, value)?,
 			ConfigKey::OpenOnClick => self.open_on_click = boolean(key, value)?,
