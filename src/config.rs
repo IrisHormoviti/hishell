@@ -528,6 +528,20 @@ impl Config {
 		}
 	}
 
+	/// The folder entries in the header layout.
+	///
+	/// `Header` lists toolkit widgets (`toolkit/PathBar`) and folders. A folder
+	/// entry docks a `FolderView` into the header; that is how the shell asks
+	/// for an applet strip, and where it lives. The shell resolves the path,
+	/// since only it knows the session root.
+	pub fn header_folders(&self) -> impl Iterator<Item = &str> + '_ {
+		self.header_layout
+			.iter()
+			.map(String::as_str)
+			.filter(|entry| !entry.starts_with("toolkit/"))
+			.filter(|entry| !entry.trim().is_empty())
+	}
+
 	pub fn load_for(location: &Location) -> ConfigLoad {
 		let mut config = Self::default();
 		let mut diagnostics = Vec::new();
@@ -839,5 +853,22 @@ mod tests {
 		assert!(!load.config.show_labels);
 		assert_eq!(load.config.view_mode, ViewMode::List);
 		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn header_folders_skip_the_toolkit_widgets() {
+		let mut config = Config::default();
+		config
+			.set(
+				ConfigKey::Header,
+				ConfigValue::Json(
+					r#"["toolkit/PathBar","~/.local/dock","toolkit/ViewButton"]"#.into(),
+				),
+			)
+			.unwrap();
+		assert_eq!(
+			config.header_folders().collect::<Vec<_>>(),
+			vec!["~/.local/dock"]
+		);
 	}
 }
