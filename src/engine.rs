@@ -1070,6 +1070,7 @@ impl Engine {
 			self.apply_runtime();
 		}
 		self.rescan();
+		self.reconcile_focus();
 		self.rebuild_diagnostics();
 		self.sync_execution();
 		self.revision += 1;
@@ -1105,6 +1106,7 @@ impl Engine {
 			}
 			ChangeScope::Items => {
 				self.rescan();
+				self.reconcile_focus();
 				self.rebuild_diagnostics();
 				FolderDelta::Reset
 			}
@@ -1135,6 +1137,23 @@ impl Engine {
 		} else {
 			self.folder = None;
 		}
+	}
+
+	/// Keep the cursor on the item it was on after a rescan.
+	///
+	/// `ItemId` is derived from the path, so an item that is still in the
+	/// folder keeps its focus. When it is gone (trashed, moved, renamed away)
+	/// the stored index would keep pointing at that position while the id it
+	/// names no longer exists: nothing draws the cursor, and the next move
+	/// starts from a stale index. Hand the rebuilt order to the focus instead,
+	/// which finds the same item by id or clamps the index into the new list.
+	fn reconcile_focus(&mut self) {
+		let Some(folder) = self.folder.as_ref() else {
+			return;
+		};
+		let order = folder.order().to_vec();
+		let pane = self.focus.pane();
+		self.focus.set_order(pane, order);
 	}
 
 	fn rebuild_diagnostics(&mut self) {
@@ -1623,6 +1642,38 @@ mod tests {
 	}
 
 	#[test]
+	fn reload_keeps_the_focused_item_and_clamps_when_it_goes() {
+		let path = temp_folder("refocus");
+		for name in ["a", "b", "c"] {
+			std::fs::write(path.join(name), b"x").unwrap();
+		}
+		let mut engine = Engine::open(&path).unwrap();
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: path.join("b"),
+			}))
+			.unwrap();
+		let focused = engine.focus().expect("b is focused");
+		assert_eq!(engine.item(focused).unwrap().name, "b");
+
+		// Another item appears: the focus stays on the same path.
+		std::fs::write(path.join("d"), b"x").unwrap();
+		engine.dispatch(Command::Reload).unwrap();
+		assert_eq!(engine.item(engine.focus().unwrap()).unwrap().name, "b");
+
+		// The focused item is gone: the cursor must still name a live item
+		// rather than a stale id that draws nothing.
+		std::fs::remove_file(path.join("b")).unwrap();
+		engine.dispatch(Command::Reload).unwrap();
+		let focused = engine.focus().expect("the cursor survives a removal");
+		assert!(engine.item(focused).is_some());
+		assert_ne!(engine.item(focused).unwrap().name, "b");
+
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
 	fn free_positions_place_items_in_their_cell() {
 		let path = temp_folder("free");
 		std::fs::write(path.join("a"), b"x").unwrap();
@@ -1648,6 +1699,56 @@ mod tests {
 			.find(|slot| engine.item(slot.item).is_some_and(|item| item.name == "b"))
 			.unwrap();
 		assert_eq!(placed.cell, (1, 0));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn setting_two_free_positions_swaps_the_items() {
+		let path = temp_folder("swap");
+		for name in ["a", "b", "c"] {
+			std::fs::write(path.join(name), b"x").unwrap();
+		}
+		let mut engine = Engine::open(&path).unwrap();
+		engine
+			.dispatch(Command::SetConfig {
+				key: ConfigKey::Sort,
+				value: ConfigValue::Str("FREE".into()),
+			})
+			.unwrap();
+		for (name, column) in [("a", 0), ("b", 1), ("c", 2)] {
+			engine
+				.dispatch(Command::SetFreePosition {
+					name: String::from(name),
+					column,
+					row: 0,
+				})
+				.unwrap();
+		}
+
+		// `a` is dropped on `b`: one command writes both cells, and `c` keeps
+		// the cell it was in.
+		engine
+			.dispatch(Command::SetFreePositions {
+				positions: vec![
+					(String::from("b"), 0, 0),
+					(String::from("a"), 1, 0),
+				],
+			})
+			.unwrap();
+
+		let cell = |engine: &Engine, name: &str| {
+			engine
+				.view(request())
+				.folder_slots()
+				.into_iter()
+				.find(|slot| engine.item(slot.item).is_some_and(|item| item.name == name))
+				.unwrap()
+				.cell
+		};
+		assert_eq!(cell(&engine, "a"), (1, 0));
+		assert_eq!(cell(&engine, "b"), (0, 0));
+		assert_eq!(cell(&engine, "c"), (2, 0));
+
 		std::fs::remove_dir_all(path).unwrap();
 	}
 
