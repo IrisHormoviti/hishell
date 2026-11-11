@@ -128,6 +128,8 @@ config_keys! {
 	SmoothScrolling => "Folder Navigation", "SmoothScrolling", Folder, View, ConfigValue::Bool(true);
 	OpenOnClick => "Folder Navigation", "OpenOnClick", Folder, View, ConfigValue::Bool(true);
 	FocusEmptySlots => "Folder Navigation", "FocusEmptySlots", Folder, View, ConfigValue::Bool(false);
+	DropItemPreference => "Folder Navigation", "DropItemPreference", Folder, View, ConfigValue::Str(String::from("MOVE"));
+	DropItemPreferenceMandate => "Folder Navigation", "DropItemPreferenceMandate", Folder, View, ConfigValue::Bool(false);
 
 	RadioEnabled => "Radio", "Enabled", Folder, View, ConfigValue::Bool(false);
 	RadioOnly => "Radio", "Only", Folder, View, ConfigValue::Str(String::from("ALL"));
@@ -160,6 +162,35 @@ impl NavigationType {
             _ => None,
         }
     }
+}
+
+/// What a drop into a folder does when the destination does not mandate the
+/// operation. The shell may still offer another one (the shake gesture).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DropPreference {
+	#[default]
+	Move,
+	Copy,
+	Link,
+}
+
+impl DropPreference {
+	pub fn as_key(self) -> &'static str {
+		match self {
+			Self::Move => "MOVE",
+			Self::Copy => "COPY",
+			Self::Link => "LINK",
+		}
+	}
+
+	pub fn from_key(value: &str) -> Option<Self> {
+		match value.to_ascii_uppercase().as_str() {
+			"MOVE" => Some(Self::Move),
+			"COPY" => Some(Self::Copy),
+			"LINK" => Some(Self::Link),
+			_ => None,
+		}
+	}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -242,6 +273,8 @@ pub struct Config {
 	pub smooth_scrolling: bool,
 	pub open_on_click: bool,
 	pub focus_empty_slots: bool,
+	pub drop_preference: DropPreference,
+	pub drop_preference_mandate: bool,
 
 	pub radio_enabled: bool,
 	pub radio_only: RadioOnly,
@@ -293,6 +326,8 @@ impl Config {
 			smooth_scrolling: false,
 			open_on_click: true,
 			focus_empty_slots: false,
+			drop_preference: DropPreference::Move,
+			drop_preference_mandate: false,
 			radio_enabled: false,
 			radio_only: RadioOnly::All,
 			radio_selected: String::new(),
@@ -374,6 +409,12 @@ impl Config {
 			ConfigKey::SmoothScrolling => ConfigValue::Bool(self.smooth_scrolling),
 			ConfigKey::OpenOnClick => ConfigValue::Bool(self.open_on_click),
 			ConfigKey::FocusEmptySlots => ConfigValue::Bool(self.focus_empty_slots),
+			ConfigKey::DropItemPreference => {
+				ConfigValue::Str(self.drop_preference.as_key().into())
+			}
+			ConfigKey::DropItemPreferenceMandate => {
+				ConfigValue::Bool(self.drop_preference_mandate)
+			}
 			ConfigKey::RadioEnabled => ConfigValue::Bool(self.radio_enabled),
 			ConfigKey::RadioOnly => ConfigValue::Str(self.radio_only.as_key().into()),
 			ConfigKey::RadioSelected => ConfigValue::Str(self.radio_selected.clone()),
@@ -448,6 +489,12 @@ impl Config {
 			ConfigKey::SmoothScrolling => self.smooth_scrolling = boolean(key, value)?,
 			ConfigKey::OpenOnClick => self.open_on_click = boolean(key, value)?,
 			ConfigKey::FocusEmptySlots => self.focus_empty_slots = boolean(key, value)?,
+			ConfigKey::DropItemPreference => {
+				self.drop_preference = parse(key, value, DropPreference::from_key)?
+			}
+			ConfigKey::DropItemPreferenceMandate => {
+				self.drop_preference_mandate = boolean(key, value)?
+			}
 			ConfigKey::RadioEnabled => self.radio_enabled = boolean(key, value)?,
 			ConfigKey::RadioOnly => self.radio_only = parse(key, value, RadioOnly::from_key)?,
 			ConfigKey::RadioSelected => self.radio_selected = string(key, value)?,
@@ -703,6 +750,41 @@ mod tests {
 			Some(ConfigKey::Lines)
 		);
 		assert_eq!(ConfigKey::from_section_name("Folder View", "Nope"), None);
+	}
+
+	#[test]
+	fn the_drop_preference_parses_its_keys() {
+		let mut config = Config::default();
+		assert_eq!(config.drop_preference, DropPreference::Move);
+		assert!(!config.drop_preference_mandate);
+
+		for (text, preference) in [
+			("COPY", DropPreference::Copy),
+			("link", DropPreference::Link),
+			("MOVE", DropPreference::Move),
+		] {
+			config
+				.set(ConfigKey::DropItemPreference, ConfigValue::Str(text.into()))
+				.unwrap();
+			assert_eq!(config.drop_preference, preference);
+			assert_eq!(
+				config.get(ConfigKey::DropItemPreference),
+				ConfigValue::Str(preference.as_key().into())
+			);
+		}
+
+		config
+			.set(ConfigKey::DropItemPreferenceMandate, ConfigValue::Bool(true))
+			.unwrap();
+		assert!(config.drop_preference_mandate);
+
+		// `ASK` was in the old schema; the shell has no prompt for it yet, so
+		// it is rejected rather than silently treated as MOVE.
+		assert!(
+			config
+				.set(ConfigKey::DropItemPreference, ConfigValue::Str("ASK".into()))
+				.is_err()
+		);
 	}
 
 	#[test]

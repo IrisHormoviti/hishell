@@ -43,7 +43,8 @@ pub use action::{
 pub use appimage::AppImageEntry;
 pub use change::{ChangeScope, ChangeSet, FolderDelta};
 pub use config::{
-	Config, ConfigDelta, ConfigDiagnostic, ConfigKey, ConfigLoad, LocationScope, NavigationType,
+	Config, ConfigDelta, ConfigDiagnostic, ConfigKey, ConfigLoad, DropPreference, LocationScope,
+	NavigationType,
 };
 pub use descriptor::Descriptor;
 pub use engine::{
@@ -86,7 +87,7 @@ pub use view::{
 pub mod prelude {
 	pub use crate::change::{ChangeScope, ChangeSet, FolderDelta};
 	pub use crate::config::{
-		Config, ConfigDelta, ConfigKey, ConfigLoad, LocationScope, NavigationType,
+		Config, ConfigDelta, ConfigKey, ConfigLoad, DropPreference, LocationScope, NavigationType,
 	};
 	pub use crate::engine::{
 		Command, Deps, Engine, Mode, OpenOptions, Outcome, RuntimeSettings, TickResult,
