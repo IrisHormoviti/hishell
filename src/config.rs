@@ -115,6 +115,7 @@ config_keys! {
 	Header => "Layout", "Header", Both, All, ConfigValue::Json(String::from(
 		r#"["toolkit/PathBar","toolkit/Spacer","toolkit/MenuBar","toolkit/WindowControl"]"#,
 	));
+	TrashIcon => "Layout", "TrashIcon", Both, All, ConfigValue::Str(String::from("user-trash"));
 	NativeMenuBar => "Layout", "NativeMenuBar", Both, All, ConfigValue::Bool(false);
 	NativeMenus => "Layout", "NativeMenus", Both, All, ConfigValue::Bool(false);
 	NativeTitleBar => "Layout", "NativeTitleBar", Both, All, ConfigValue::Bool(true);
@@ -260,6 +261,7 @@ pub struct Config {
 	pub middle_layout: Vec<String>,
 	pub bottom_layout: Vec<String>,
 	pub header_layout: Vec<String>,
+	pub trash_icon: String,
 	pub native_menubar: bool,
 	pub native_menus: bool,
 	pub native_titlebar: bool,
@@ -314,6 +316,7 @@ impl Config {
 			middle_layout: Vec::new(),
 			bottom_layout: Vec::new(),
 			header_layout: Vec::new(),
+			trash_icon: String::from("user-trash"),
 			native_menubar: false,
 			native_menus: false,
 			native_titlebar: true,
@@ -397,6 +400,7 @@ impl Config {
 			ConfigKey::Header => ConfigValue::Json(
 				serde_json::to_string(&self.header_layout).unwrap_or_else(|_| "[]".into()),
 			),
+			ConfigKey::TrashIcon => ConfigValue::Str(self.trash_icon.clone()),
 			ConfigKey::NativeMenuBar => ConfigValue::Bool(self.native_menubar),
 			ConfigKey::NativeMenus => ConfigValue::Bool(self.native_menus),
 			ConfigKey::NativeTitleBar => ConfigValue::Bool(self.native_titlebar),
@@ -475,6 +479,7 @@ impl Config {
 			ConfigKey::Middle => self.middle_layout = json(key, value)?,
 			ConfigKey::Bottom => self.bottom_layout = json(key, value)?,
 			ConfigKey::Header => self.header_layout = json(key, value)?,
+			ConfigKey::TrashIcon => self.trash_icon = string(key, value)?,
 			ConfigKey::NativeMenuBar => self.native_menubar = boolean(key, value)?,
 			ConfigKey::NativeMenus => self.native_menus = boolean(key, value)?,
 			ConfigKey::NativeTitleBar => self.native_titlebar = boolean(key, value)?,
@@ -853,6 +858,23 @@ mod tests {
 		assert!(!load.config.show_labels);
 		assert_eq!(load.config.view_mode, ViewMode::List);
 		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn trash_icon_comes_from_the_layout() {
+		let mut config = Config::default();
+		assert_eq!(config.trash_icon, "user-trash");
+		config
+			.set(
+				ConfigKey::TrashIcon,
+				ConfigValue::Str(String::from("user-trash-full")),
+			)
+			.unwrap();
+		assert_eq!(config.trash_icon, "user-trash-full");
+		assert_eq!(
+			config.get(ConfigKey::TrashIcon),
+			ConfigValue::Str(String::from("user-trash-full"))
+		);
 	}
 
 	#[test]
