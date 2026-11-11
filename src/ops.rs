@@ -1,8 +1,10 @@
 //! Synchronous filesystem operations.
 
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Overwrite {
@@ -188,24 +190,98 @@ pub struct OpOutcome {
 
 pub type JobOutcome = OpOutcome;
 
+/// Receives transfer progress and owns the destination's `[Progress]` metadata.
+pub trait ProgressSink {
+	fn begin(&mut self, path: &Path, is_dir: bool, task: &str, target: u64);
+	fn update(&mut self, path: &Path, value: u64, total: u64);
+	fn finish(&mut self, path: &Path);
+}
+
+struct NoProgress;
+
+impl ProgressSink for NoProgress {
+	fn begin(&mut self, _path: &Path, _is_dir: bool, _task: &str, _target: u64) {}
+	fn update(&mut self, _path: &Path, _value: u64, _total: u64) {}
+	fn finish(&mut self, _path: &Path) {}
+}
+
+#[derive(Clone, Copy)]
+struct Control<'a> {
+	cancel: &'a AtomicBool,
+	paused: Option<&'a AtomicBool>,
+}
+
+impl Control<'_> {
+	/// True when the job was cancelled. While paused this blocks until the
+	/// user resumes or stops it.
+	fn stopped(&self) -> bool {
+		loop {
+			if self.cancel.load(Ordering::Relaxed) {
+				return true;
+			}
+			if self
+				.paused
+				.is_some_and(|paused| paused.load(Ordering::Relaxed))
+			{
+				std::thread::sleep(Duration::from_millis(40));
+				continue;
+			}
+			return false;
+		}
+	}
+}
+
 /// Run one operation on the calling thread. Workers call this; it never touches
 /// a frontend.
 pub fn run(op: &Op, cancel: &AtomicBool) -> OpOutcome {
+	run_with(op, cancel, None, &mut NoProgress)
+}
+
+pub fn run_with(
+	op: &Op,
+	cancel: &AtomicBool,
+	paused: Option<&AtomicBool>,
+	progress: &mut dyn ProgressSink,
+) -> OpOutcome {
+	let control = Control { cancel, paused };
 	let mut outcome = OpOutcome::default();
 	match op {
 		Op::Copy {
 			sources,
 			dest,
 			options,
-		} => transfer(sources, dest, *options, false, cancel, &mut outcome),
+		} => transfer(
+			sources,
+			dest,
+			TransferSpec {
+				options: *options,
+				move_mode: false,
+				control,
+				task: "Copying...",
+			},
+			progress,
+			&mut outcome,
+		),
 		Op::Move {
 			sources,
 			dest,
 			options,
-		} => transfer(sources, dest, *options, true, cancel, &mut outcome),
+		} => transfer(
+			sources,
+			dest,
+			TransferSpec {
+				options: *options,
+				move_mode: true,
+				control,
+				task: "Moving...",
+			},
+			progress,
+			&mut outcome,
+		),
 		Op::Link { sources, dest } => {
 			for source in sources {
-				if cancelled(cancel, &mut outcome) {
+				if control.stopped() {
+					outcome.cancelled = true;
 					break;
 				}
 				let target = destination_for(source, dest, sources.len());
@@ -227,9 +303,17 @@ pub fn run(op: &Op, cancel: &AtomicBool) -> OpOutcome {
 			transfer(
 				&snapshot.paths,
 				dest,
-				copy,
-				options.cut,
-				cancel,
+				TransferSpec {
+					options: copy,
+					move_mode: options.cut,
+					control,
+					task: if options.cut {
+						"Moving..."
+					} else {
+						"Copying..."
+					},
+				},
+				progress,
 				&mut outcome,
 			);
 		}
@@ -238,7 +322,8 @@ pub fn run(op: &Op, cancel: &AtomicBool) -> OpOutcome {
 			if paths.is_empty() {
 				return outcome;
 			}
-			if cancelled(cancel, &mut outcome) {
+			if control.stopped() {
+				outcome.cancelled = true;
 				return outcome;
 			}
 			match trash::delete_all(paths) {
@@ -252,7 +337,8 @@ pub fn run(op: &Op, cancel: &AtomicBool) -> OpOutcome {
 		}
 		Op::Delete { paths } => {
 			for path in paths {
-				if cancelled(cancel, &mut outcome) {
+				if control.stopped() {
+					outcome.cancelled = true;
 					break;
 				}
 				match remove(path) {
@@ -280,11 +366,16 @@ pub fn run(op: &Op, cancel: &AtomicBool) -> OpOutcome {
 		},
 		Op::Duplicate { paths } => {
 			for path in paths {
-				if cancelled(cancel, &mut outcome) {
+				if control.stopped() {
+					outcome.cancelled = true;
 					break;
 				}
-				match duplicate(path, cancel) {
-					Ok(target) => outcome.succeeded.push(target),
+				match duplicate(path, control, progress) {
+					Ok(Some(target)) => outcome.succeeded.push(target),
+					Ok(None) => {
+						outcome.cancelled = true;
+						break;
+					}
 					Err(error) => fail(&mut outcome, path, error),
 				}
 			}
@@ -305,15 +396,6 @@ pub fn run(op: &Op, cancel: &AtomicBool) -> OpOutcome {
 	outcome
 }
 
-fn cancelled(cancel: &AtomicBool, outcome: &mut OpOutcome) -> bool {
-	if cancel.load(Ordering::Relaxed) {
-		outcome.cancelled = true;
-		true
-	} else {
-		false
-	}
-}
-
 fn fail(outcome: &mut OpOutcome, path: &Path, error: OpError) {
 	outcome.failed.push(OpFailure {
 		path: path.to_path_buf(),
@@ -321,12 +403,18 @@ fn fail(outcome: &mut OpOutcome, path: &Path, error: OpError) {
 	});
 }
 
+struct TransferSpec<'a> {
+	options: CopyOptions,
+	move_mode: bool,
+	control: Control<'a>,
+	task: &'a str,
+}
+
 fn transfer(
 	sources: &[PathBuf],
 	dest: &Path,
-	options: CopyOptions,
-	move_mode: bool,
-	cancel: &AtomicBool,
+	spec: TransferSpec,
+	progress: &mut dyn ProgressSink,
 	outcome: &mut OpOutcome,
 ) {
 	if sources.len() > 1 && !dest.exists() {
@@ -338,23 +426,42 @@ fn transfer(
 		}
 	}
 	for source in sources {
-		if cancelled(cancel, outcome) {
+		if spec.control.stopped() {
+			outcome.cancelled = true;
 			break;
 		}
 		let target = destination_for(source, dest, sources.len());
-		let result = if move_mode {
-			move_item(source, &target, options, cancel)
+		let result = if spec.move_mode {
+			move_item(
+				source,
+				&target,
+				spec.options,
+				spec.control,
+				spec.task,
+				progress,
+			)
 		} else {
-			copy_item(source, &target, options, cancel)
+			copy_root(
+				source,
+				&target,
+				spec.options,
+				spec.control,
+				spec.task,
+				progress,
+			)
 		};
 		match result {
-			Ok(()) => outcome.succeeded.push(target),
+			Ok(true) => outcome.succeeded.push(target),
+			Ok(false) => {
+				outcome.cancelled = true;
+				break;
+			}
 			Err(error) => fail(outcome, source, error),
 		}
 	}
 }
 
-fn destination_for(source: &Path, dest: &Path, source_count: usize) -> PathBuf {
+pub(crate) fn destination_for(source: &Path, dest: &Path, source_count: usize) -> PathBuf {
 	if dest.is_dir() {
 		return source
 			.file_name()
@@ -371,17 +478,76 @@ fn destination_for(source: &Path, dest: &Path, source_count: usize) -> PathBuf {
 	}
 }
 
+struct CopyContext<'a> {
+	progress: &'a mut dyn ProgressSink,
+	task: &'a str,
+	total: u64,
+	root: PathBuf,
+	done: u64,
+	started: bool,
+	/// The destination is a folder with a temporary progress `.directory`.
+	dir_progress: bool,
+}
+
+impl CopyContext<'_> {
+	fn start(&mut self, is_dir: bool) {
+		if self.started {
+			return;
+		}
+		self.started = true;
+		self.dir_progress = is_dir;
+		self.progress.begin(&self.root, is_dir, self.task, self.total);
+	}
+
+	fn add(&mut self, bytes: u64) {
+		self.done = self.done.saturating_add(bytes).min(self.total);
+		self.progress.update(&self.root, self.done, self.total);
+	}
+
+	fn finish(&mut self) {
+		if self.started {
+			self.started = false;
+			self.progress.finish(&self.root);
+		}
+	}
+}
+
+fn copy_root(
+	source: &Path,
+	target: &Path,
+	options: CopyOptions,
+	control: Control,
+	task: &str,
+	progress: &mut dyn ProgressSink,
+) -> Result<bool, OpError> {
+	let total = total_size(source).max(1);
+	let mut context = CopyContext {
+		progress,
+		task,
+		total,
+		root: target.to_path_buf(),
+		done: 0,
+		started: false,
+		dir_progress: false,
+	};
+	let result = copy_item(source, target, options, control, &mut context, true);
+	context.finish();
+	result
+}
+
 fn copy_item(
 	source: &Path,
 	target: &Path,
 	options: CopyOptions,
-	cancel: &AtomicBool,
-) -> Result<(), OpError> {
-	if cancel.load(Ordering::Relaxed) {
-		return Ok(());
+	control: Control,
+	context: &mut CopyContext,
+	top: bool,
+) -> Result<bool, OpError> {
+	if control.stopped() {
+		return Ok(false);
 	}
 	if source == target {
-		return Ok(());
+		return Ok(true);
 	}
 	if source.is_dir() && target.starts_with(source) {
 		return Err(OpError::InvalidName(format!(
@@ -396,34 +562,111 @@ fn copy_item(
 	if metadata.file_type().is_symlink() && !options.follow_symlinks {
 		let link_target = fs::read_link(source).map_err(io_error)?;
 		remove_for_overwrite(target, options.overwrite)?;
-		return make_symlink(&link_target, target);
+		if top {
+			context.start(false);
+		}
+		make_symlink(&link_target, target)?;
+		return Ok(true);
 	}
 	if metadata.is_dir() {
 		remove_for_overwrite(target, options.overwrite)?;
 		fs::create_dir_all(target).map_err(io_error)?;
+		if top {
+			context.start(true);
+		}
 		for entry in fs::read_dir(source).map_err(io_error)? {
 			let entry = entry.map_err(io_error)?;
-			copy_item(
+			if !copy_item(
 				&entry.path(),
 				&target.join(entry.file_name()),
 				options,
-				cancel,
-			)?;
-			if cancel.load(Ordering::Relaxed) {
-				return Ok(());
+				control,
+				context,
+				false,
+			)? {
+				return Ok(false);
 			}
 		}
 		if options.preserve_times {
 			copy_times(source, target)?;
 		}
-		return Ok(());
+		return Ok(true);
+	}
+
+	// A folder copy writes its progress into `<target>/.directory`. When the
+	// source folder has a `.directory` of its own, merge that metadata into
+	// the temporary file instead of replacing the progress group.
+	if context.dir_progress
+		&& source
+			.file_name()
+			.is_some_and(|name| name == std::ffi::OsStr::new(".directory"))
+		&& target.exists()
+	{
+		copy_directory_entry(source, target, context)?;
+		if options.preserve_times {
+			copy_times(source, target)?;
+		}
+		return Ok(true);
 	}
 
 	remove_for_overwrite(target, options.overwrite)?;
-	fs::copy(source, target).map_err(io_error)?;
+	if top {
+		context.start(false);
+	}
+	if !copy_file(source, target, control, context)? {
+		return Ok(false);
+	}
 	if options.preserve_times {
 		copy_times(source, target)?;
 	}
+	Ok(true)
+}
+
+fn copy_file(
+	source: &Path,
+	target: &Path,
+	control: Control,
+	context: &mut CopyContext,
+) -> Result<bool, OpError> {
+	let mut input = fs::File::open(source).map_err(io_error)?;
+	let mut output = fs::OpenOptions::new()
+		.write(true)
+		.create(true)
+		.truncate(true)
+		.open(target)
+		.map_err(io_error)?;
+	let mut buffer = vec![0u8; 1024 * 1024];
+	loop {
+		if control.stopped() {
+			return Ok(false);
+		}
+		let read = input.read(&mut buffer).map_err(io_error)?;
+		if read == 0 {
+			break;
+		}
+		output.write_all(&buffer[..read]).map_err(io_error)?;
+		context.add(read as u64);
+	}
+	output.flush().map_err(io_error)?;
+	let permissions = fs::metadata(source).map_err(io_error)?.permissions();
+	fs::set_permissions(target, permissions).map_err(io_error)?;
+	Ok(true)
+}
+
+/// Copy a source `.directory` over the progress file while keeping the live
+/// `[Progress]` group the transfer is writing.
+fn copy_directory_entry(
+	source: &Path,
+	target: &Path,
+	context: &mut CopyContext,
+) -> Result<(), OpError> {
+	let written = crate::progress::merge_section_file(
+		source,
+		target,
+		crate::progress::SECTION,
+	)
+	.map_err(io_error)?;
+	context.add(written as u64);
 	Ok(())
 }
 
@@ -431,10 +674,15 @@ fn move_item(
 	source: &Path,
 	target: &Path,
 	options: CopyOptions,
-	cancel: &AtomicBool,
-) -> Result<(), OpError> {
+	control: Control,
+	task: &str,
+	progress: &mut dyn ProgressSink,
+) -> Result<bool, OpError> {
+	if control.stopped() {
+		return Ok(false);
+	}
 	if source == target {
-		return Ok(());
+		return Ok(true);
 	}
 	if source.is_dir() && target.starts_with(source) {
 		return Err(OpError::InvalidName(format!(
@@ -447,16 +695,38 @@ fn move_item(
 	}
 	remove_for_overwrite(target, options.overwrite)?;
 	match fs::rename(source, target) {
-		Ok(()) => Ok(()),
+		Ok(()) => Ok(true),
 		Err(error) if error.raw_os_error() == Some(18) => {
-			copy_item(source, target, options, cancel)?;
-			if cancel.load(Ordering::Relaxed) {
-				return Ok(());
+			if !copy_root(source, target, options, control, task, progress)? {
+				return Ok(false);
 			}
-			remove(source)
+			remove(source)?;
+			Ok(true)
 		}
 		Err(error) => Err(io_error(error)),
 	}
+}
+
+fn total_size(path: &Path) -> u64 {
+	let Ok(metadata) = fs::symlink_metadata(path) else {
+		return 0;
+	};
+	if metadata.file_type().is_symlink() {
+		return 0;
+	}
+	if metadata.is_file() {
+		return metadata.len();
+	}
+	if !metadata.is_dir() {
+		return 0;
+	}
+	let mut total: u64 = 0;
+	if let Ok(entries) = fs::read_dir(path) {
+		for entry in entries.flatten() {
+			total = total.saturating_add(total_size(&entry.path()));
+		}
+	}
+	total
 }
 
 fn link(source: &Path, target: &Path) -> Result<(), OpError> {
@@ -552,7 +822,11 @@ fn new_text_file(parent: &Path) -> Result<PathBuf, OpError> {
 	Ok(target)
 }
 
-fn duplicate(path: &Path, cancel: &AtomicBool) -> Result<PathBuf, OpError> {
+fn duplicate(
+	path: &Path,
+	control: Control,
+	progress: &mut dyn ProgressSink,
+) -> Result<Option<PathBuf>, OpError> {
 	let parent = path
 		.parent()
 		.ok_or_else(|| OpError::InvalidName(path.to_string_lossy().into_owned()))?;
@@ -566,8 +840,17 @@ fn duplicate(path: &Path, cancel: &AtomicBool) -> Result<PathBuf, OpError> {
 		.map(|extension| format!(".{extension}"))
 		.unwrap_or_default();
 	let target = unique_path(parent, &format!("{stem} copy"), &extension);
-	copy_item(path, &target, CopyOptions::default(), cancel)?;
-	Ok(target)
+	if !copy_root(
+		path,
+		&target,
+		CopyOptions::default(),
+		control,
+		"Duplicating...",
+		progress,
+	)? {
+		return Ok(None);
+	}
+	Ok(Some(target))
 }
 
 fn unique_path(parent: &Path, stem: &str, extension: &str) -> PathBuf {
@@ -776,6 +1059,112 @@ mod tests {
 		});
 		assert!(!file.exists());
 		assert!(!folder.exists());
+		fs::remove_dir_all(root).unwrap();
+	}
+
+	struct TrackingSink {
+		trackers: std::collections::HashMap<PathBuf, crate::progress::Tracker>,
+		begun: Vec<PathBuf>,
+		updates: Vec<u64>,
+		finished: Vec<PathBuf>,
+		sidecar_at_begin: Vec<bool>,
+	}
+
+	impl ProgressSink for TrackingSink {
+		fn begin(&mut self, path: &Path, is_dir: bool, task: &str, target: u64) {
+			let tracker = crate::progress::Tracker::begin(path, is_dir, task, target);
+			self.sidecar_at_begin.push(
+				crate::progress::entry_path(path, is_dir).is_file(),
+			);
+			self.begun.push(path.to_path_buf());
+			self.trackers.insert(path.to_path_buf(), tracker);
+		}
+
+		fn update(&mut self, path: &Path, value: u64, _total: u64) {
+			self.updates.push(value);
+			if let Some(tracker) = self.trackers.get_mut(path) {
+				tracker.update(value);
+			}
+		}
+
+		fn finish(&mut self, path: &Path) {
+			self.finished.push(path.to_path_buf());
+			if let Some(tracker) = self.trackers.remove(path) {
+				tracker.finish();
+			}
+		}
+	}
+
+	#[test]
+	fn a_copy_reports_progress_and_removes_its_sidecar() {
+		let root = tree("progress");
+		let source = root.join("a.bin");
+		fs::write(&source, vec![0u8; 64 * 1024]).unwrap();
+		let dest = root.join("dest");
+		fs::create_dir_all(&dest).unwrap();
+		let mut sink = TrackingSink {
+			trackers: std::collections::HashMap::new(),
+			begun: Vec::new(),
+			updates: Vec::new(),
+			finished: Vec::new(),
+			sidecar_at_begin: Vec::new(),
+		};
+		let outcome = run_with(
+			&Op::Copy {
+				sources: vec![source],
+				dest: dest.clone(),
+				options: CopyOptions::default(),
+			},
+			&AtomicBool::new(false),
+			None,
+			&mut sink,
+		);
+		assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+		let target = dest.join("a.bin");
+		assert_eq!(sink.begun, vec![target.clone()]);
+		assert_eq!(sink.finished, vec![target.clone()]);
+		assert_eq!(sink.sidecar_at_begin, vec![true]);
+		assert!(sink.updates.iter().any(|value| *value > 0));
+		assert!(!crate::progress::entry_path(&target, false).exists());
+		assert!(target.is_file());
+		fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn a_folder_copy_keeps_the_source_directory_metadata() {
+		let root = tree("progress-folder");
+		let source = root.join("app");
+		fs::create_dir_all(&source).unwrap();
+		fs::write(
+			source.join(".directory"),
+			"[Desktop Entry]\nType=Application\nName=App\nExec=./app\n",
+		)
+		.unwrap();
+		fs::write(source.join("app"), b"x").unwrap();
+		let dest = root.join("dest");
+		fs::create_dir_all(&dest).unwrap();
+		let mut sink = TrackingSink {
+			trackers: std::collections::HashMap::new(),
+			begun: Vec::new(),
+			updates: Vec::new(),
+			finished: Vec::new(),
+			sidecar_at_begin: Vec::new(),
+		};
+		let outcome = run_with(
+			&Op::Copy {
+				sources: vec![source.clone()],
+				dest: dest.clone(),
+				options: CopyOptions::default(),
+			},
+			&AtomicBool::new(false),
+			None,
+			&mut sink,
+		);
+		assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+		let entry = dest.join("app/.directory");
+		let text = fs::read_to_string(&entry).unwrap();
+		assert!(text.contains("Name=App"));
+		assert!(!text.contains("[Progress]"));
 		fs::remove_dir_all(root).unwrap();
 	}
 

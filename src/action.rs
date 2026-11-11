@@ -46,6 +46,9 @@ impl ActionId {
 	pub const RADIO: Self = Self("radio");
 	pub const SET_DEFAULT_APP: Self = Self("set-default-app");
 	pub const QUIT_ACTIVE: Self = Self("quit-active");
+	pub const PAUSE_PROGRESS: Self = Self("pause-progress");
+	pub const RESUME_PROGRESS: Self = Self("resume-progress");
+	pub const STOP_PROGRESS: Self = Self("stop-progress");
 
 	pub fn as_str(self) -> &'static str {
 		self.0
@@ -101,6 +104,7 @@ impl ActionSubjects {
 	pub const TOGGLE: Self = Self(1 << 9);
 	pub const NUMBER: Self = Self(1 << 10);
 	pub const RADIO: Self = Self(1 << 11);
+	pub const PROGRESS: Self = Self(1 << 12);
 	pub const ITEMS: Self = Self(
 		Self::FOLDER.0
 			| Self::FILE.0
@@ -491,6 +495,36 @@ pub static DESCRIPTORS: &[ActionDescriptor] = &[
 		icon_name: "process-stop",
 		default_shortcut: None,
 		i18n_key: "quit-active",
+	},
+	ActionDescriptor {
+		id: ActionId::PAUSE_PROGRESS,
+		group: GROUP_OPEN,
+		subjects: ActionSubjects::PROGRESS,
+		menus: MAIN_CONTEXT,
+		location: LocationScope::Both,
+		icon_name: "media-playback-pause",
+		default_shortcut: None,
+		i18n_key: "pause-progress",
+	},
+	ActionDescriptor {
+		id: ActionId::RESUME_PROGRESS,
+		group: GROUP_OPEN,
+		subjects: ActionSubjects::PROGRESS,
+		menus: MAIN_CONTEXT,
+		location: LocationScope::Both,
+		icon_name: "media-playback-start",
+		default_shortcut: None,
+		i18n_key: "resume-progress",
+	},
+	ActionDescriptor {
+		id: ActionId::STOP_PROGRESS,
+		group: GROUP_OPEN,
+		subjects: ActionSubjects::PROGRESS,
+		menus: MAIN_CONTEXT,
+		location: LocationScope::Both,
+		icon_name: "process-stop",
+		default_shortcut: None,
+		i18n_key: "stop-progress",
 	},
 ];
 

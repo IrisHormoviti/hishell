@@ -303,6 +303,7 @@ mod tests {
 			group_label: String::new(),
 			is_stashed: false,
 			custom_group: String::new(),
+			progress: None,
 		}
 	}
 

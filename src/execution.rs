@@ -98,6 +98,8 @@ pub struct SpawnRequest {
 	pub cwd: Option<PathBuf>,
 	pub animation: String,
 	pub screen: Option<String>,
+	/// `[App Display] MainDisplay`; becomes the compositor's panel hint.
+	pub main_display: Option<i32>,
 	pub through_wrapper: bool,
 	/// Whether this launch represents a running application, rather than a
 	/// short-lived provider command.
@@ -184,11 +186,17 @@ impl Spawner for FreeDesktopSpawner {
 		if let Some(cwd) = &request.cwd {
 			command.current_dir(cwd);
 		}
-		announce_launch(&request.animation, &request.item);
-		command
-			.spawn()
-			.map(|_| ())
-			.map_err(|error| LaunchError::Spawn(error.to_string()))
+		let marker = announce_launch(&request.animation, &request.item);
+		match command.spawn() {
+			Ok(_) => Ok(()),
+			Err(error) => {
+				// The compositor treats a missing marker as a withdrawn launch
+				// and fades the wash out. Without this, a synchronous spawn
+				// failure would leave the panels covered for the 8 s cap.
+				withdraw_launch(marker.as_deref());
+				Err(LaunchError::Spawn(error.to_string()))
+			}
+		}
 	}
 
 	fn quit(&self, wrapper: &str, item: &Path) -> Result<(), LaunchError> {
@@ -435,6 +443,7 @@ impl Execution {
 					cwd: path.parent().map(Path::to_path_buf),
 					animation: String::new(),
 					screen: self.screen.clone(),
+					main_display: None,
 					through_wrapper: false,
 					track_active: false,
 				})
@@ -511,6 +520,21 @@ impl Execution {
 			entry.entry_type,
 			Some(EntryType::Application | EntryType::File | EntryType::Link)
 		);
+		// An app that does not ask for a wash still gets one. Upstream entries
+		// rarely set LaunchAnimation, and without the key the compositor wrote
+		// "none" and left the shell visible until the app mapped a window.
+		// `LaunchAnimation=none` is still the explicit opt-out.
+		let animation = entry
+			.launch_animation
+			.clone()
+			.filter(|value| !value.trim().is_empty())
+			.unwrap_or_else(|| {
+				if through_wrapper {
+					String::from("black")
+				} else {
+					String::new()
+				}
+			});
 		Ok(SpawnRequest {
 			program,
 			args,
@@ -524,8 +548,9 @@ impl Execution {
 				})
 				.unwrap_or_default(),
 			cwd: entry.path.parent().map(Path::to_path_buf),
-			animation: entry.launch_animation.clone().unwrap_or_default(),
+			animation,
 			screen: self.screen.clone(),
+			main_display: entry.main_display,
 			through_wrapper,
 			track_active: true,
 		})
@@ -558,6 +583,7 @@ impl Execution {
 			cwd: entry.path.parent().map(Path::to_path_buf),
 			animation: String::new(),
 			screen: self.screen.clone(),
+			main_display: entry.main_display,
 			// Controls talk to their provider directly; the execution wrapper
 			// is for launching applications.
 			through_wrapper: false,
@@ -685,9 +711,14 @@ fn apply_environment(command: &mut Command, request: &SpawnRequest) {
 	{
 		command.env(SCREEN_ENV, screen);
 	}
+	if let Some(display) = request.main_display.filter(|display| *display >= 0) {
+		// The compositor's per-client panel hint. A single index keeps every
+		// window of this app on the requested panel.
+		command.env("CLAM_WINDOW_ORDER", display.to_string());
+	}
 }
 
-fn announce_launch(animation: &str, item: &Path) {
+fn announce_launch(animation: &str, item: &Path) -> Option<PathBuf> {
 	let animation = animation.trim();
 	let colour = match animation {
 		"white" => "white",
@@ -712,7 +743,15 @@ fn announce_launch(animation: &str, item: &Path) {
 	let text = format!("{colour}\n{nonce}\n{}\n", item.to_string_lossy());
 	let temporary = path.with_extension("tmp");
 	if std::fs::write(&temporary, text).is_ok() {
-		let _ = std::fs::rename(&temporary, path);
+		let _ = std::fs::rename(&temporary, &path);
+		return Some(path);
+	}
+	None
+}
+
+fn withdraw_launch(path: Option<&Path>) {
+	if let Some(path) = path {
+		let _ = std::fs::remove_file(path);
 	}
 }
 
@@ -914,6 +953,32 @@ mod tests {
 			&[],
 		);
 		assert_eq!(args, vec!["start", "--", "micro"]);
+	}
+
+	#[test]
+	fn main_display_becomes_the_compositor_panel_hint() {
+		let mut command = Command::new("true");
+		apply_environment(
+			&mut command,
+			&SpawnRequest {
+				program: String::from("true"),
+				args: Vec::new(),
+				item: PathBuf::new(),
+				name: String::new(),
+				cwd: None,
+				animation: String::new(),
+				screen: None,
+				main_display: Some(0),
+				through_wrapper: false,
+				track_active: false,
+			},
+		);
+		let value = command
+			.get_envs()
+			.find(|(key, _)| *key == "CLAM_WINDOW_ORDER")
+			.and_then(|(_, value)| value)
+			.map(|value| value.to_string_lossy().into_owned());
+		assert_eq!(value.as_deref(), Some("0"));
 	}
 
 	#[test]

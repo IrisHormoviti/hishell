@@ -22,7 +22,8 @@ use crate::focus::{Focus, FocusCommand};
 use crate::folder::{Folder, ScanOptions};
 use crate::history::{History, HistoryCommand, HistoryEntry, HistoryStatus};
 use crate::item::{Item, ItemId};
-use crate::jobs::{JobEvent, JobHandle, Jobs};
+use crate::jobs::{JobEvent, JobHandle, JobId, Jobs};
+use crate::progress::{ProgressAction, ProgressControl};
 use crate::location::Location;
 use crate::navigation::{NavigationPlan, NavigationRequest, PathRelation, SlotAnchor, relation};
 use crate::prompt::{FrontendRequest, Prompt};
@@ -176,6 +177,10 @@ pub struct Engine {
 	revision: u64,
 	last_view: RefCell<Option<FolderView>>,
 	jobs: Jobs,
+	/// Jobs that have not reported Finished or Cancelled yet.
+	running_jobs: HashMap<JobId, JobHandle>,
+	/// Destination path -> the job that is writing its `[Progress]` metadata.
+	progress_jobs: HashMap<PathBuf, JobHandle>,
 	execution: Execution,
 	platform: crate::platform::Platform,
 	history: History,
@@ -232,12 +237,15 @@ impl Engine {
 			revision: 0,
 			last_view: RefCell::new(None),
 			jobs: Jobs::default(),
+			running_jobs: HashMap::new(),
+			progress_jobs: HashMap::new(),
 			execution: Execution::new(wrapper, screen, spawner, Arc::new(SystemClock)),
 			platform: options.deps.platform,
 			history: History::default(),
 			focus: Focus::default(),
 		};
 		engine.reload();
+		engine.cleanup_stale_progress();
 		engine.history.record(HistoryEntry {
 			pane: PaneId(0),
 			path: engine.folder_path(),
@@ -258,6 +266,12 @@ impl Engine {
 		&self.config
 	}
 
+	/// The platform's thumbnailer, when the host provides one. A frontend can
+	/// hold the returned handle and render thumbnails off the UI thread.
+	pub fn thumbnailer(&self) -> Option<Arc<dyn crate::platform::Thumbnailer>> {
+		self.platform.thumbnails.clone()
+	}
+
 	pub fn items(&self) -> &[Item] {
 		self.folder
 			.as_ref()
@@ -271,6 +285,74 @@ impl Engine {
 
 	pub fn item_at(&self, path: &Path) -> Option<&Item> {
 		self.folder.as_ref().and_then(|folder| folder.item_at(path))
+	}
+
+	/// The controls a frontend should expose for an item with a live task.
+	///
+	/// Hishell's own transfers are controlled through their job; an external
+	/// downloader is controlled through the `Pause=`, `Resume=` and `Stop=`
+	/// commands in the sidecar.
+	pub fn progress_control(&self, item: &Item) -> Option<ProgressControl> {
+		if let Some(handle) = self.progress_jobs.get(&item.path) {
+			let paused = handle.is_paused();
+			return Some(ProgressControl {
+				can_pause: !paused,
+				can_resume: paused,
+				can_stop: true,
+				paused,
+			});
+		}
+		item.progress.as_ref().map(crate::progress::Progress::control)
+	}
+
+	pub fn progress_paused(&self, path: &Path) -> bool {
+		self.progress_jobs
+			.get(path)
+			.is_some_and(JobHandle::is_paused)
+	}
+
+	/// A Hishell transfer that died with the previous shell leaves its
+	/// `[Progress]` group behind. No job in this process owns it, so remove it
+	/// instead of showing an item that can never be opened or stopped.
+	fn cleanup_stale_progress(&mut self) {
+		let stale: Vec<(PathBuf, PathBuf, bool)> = self
+			.items()
+			.iter()
+			.filter(|item| {
+				item.progress.as_ref().is_some_and(|progress| {
+					progress
+						.owner
+						.as_deref()
+						.is_some_and(|owner| owner.eq_ignore_ascii_case("hishell"))
+				})
+			})
+			.filter(|item| {
+				!self.progress_jobs.contains_key(&item.path)
+					&& !crate::progress::is_active(&item.path)
+			})
+			.filter_map(|item| {
+				item.entry_path.clone().map(|entry| {
+					(
+						item.path.clone(),
+						entry,
+						item.fs_kind == crate::item::FsKind::File,
+					)
+				})
+			})
+			.collect();
+		if stale.is_empty() {
+			return;
+		}
+		for (path, entry, is_file) in stale {
+			crate::progress::remove_section(&entry, crate::progress::SECTION);
+			if is_file
+				&& !path.exists()
+				&& !crate::progress::has_meaningful_keys(&entry)
+			{
+				let _ = std::fs::remove_file(&entry);
+			}
+		}
+		self.reload();
 	}
 
 	pub fn diagnostics(&self) -> &[crate::config::ConfigDiagnostic] {
@@ -476,6 +558,7 @@ impl Engine {
 			}
 			Command::Run(op) => {
 				let job = self.jobs.submit(op);
+				self.running_jobs.insert(job.id(), job.clone());
 				return Ok(Outcome {
 					changes: ChangeSet::default(),
 					effects: Vec::new(),
@@ -551,7 +634,23 @@ impl Engine {
 	}
 
 	pub fn tick(&mut self) -> TickResult {
-		let mut effects: Vec<Effect> = self.jobs.drain().into_iter().map(Effect::Job).collect();
+		let events = self.jobs.drain();
+		for event in &events {
+			match event {
+				JobEvent::Progress { id, current, .. } => {
+					if let Some(handle) = self.running_jobs.get(id) {
+						self.progress_jobs.insert(current.clone(), handle.clone());
+					}
+				}
+				JobEvent::Finished { id, .. } | JobEvent::Cancelled { id } => {
+					self.running_jobs.remove(id);
+					self.progress_jobs
+						.retain(|_, handle| handle.id() != *id);
+				}
+				JobEvent::Started { .. } => {}
+			}
+		}
+		let mut effects: Vec<Effect> = events.into_iter().map(Effect::Job).collect();
 		effects.extend(self.execution.poll().into_iter().map(Effect::LaunchEvent));
 		TickResult {
 			changes: ChangeSet::default(),
@@ -584,7 +683,7 @@ impl Engine {
 	}
 
 	pub fn actions(&self, request: &ActionRequest) -> Vec<ActionSpec> {
-		let mut items: Vec<&Item> = match &request.target {
+		let items: Vec<&Item> = match &request.target {
 			Target::Location => Vec::new(),
 			Target::Focus => self
 				.focus
@@ -619,8 +718,16 @@ impl Engine {
 			}
 		};
 		let has_items = !items.is_empty();
+		let busy = items.iter().any(|item| item.is_busy());
+		let controls: Vec<ProgressControl> = items
+			.iter()
+			.filter_map(|item| self.progress_control(item))
+			.collect();
+		let can_pause = controls.iter().any(|control| control.can_pause);
+		let can_resume = controls.iter().any(|control| control.can_resume);
+		let can_stop = controls.iter().any(|control| control.can_stop);
 		let mut subjects = ActionSubjects::HERE;
-		for item in items.drain(..) {
+		for item in &items {
 			subjects = subjects.union(item_subjects(item));
 			if self.is_radio_member(&item.path) {
 				subjects = subjects.union(ActionSubjects::RADIO);
@@ -643,7 +750,18 @@ impl Engine {
 			})
 			.map(|descriptor| {
 				let needs_items = !descriptor.subjects.contains(ActionSubjects::HERE);
-				let enabled = !needs_items || has_items;
+				let activation = matches!(
+					descriptor.id,
+					ActionId::OPEN | ActionId::OPEN_WITH | ActionId::NAVIGATE
+				);
+				let enabled = (!needs_items || has_items)
+					&& !(busy && activation)
+					&& match descriptor.id {
+						ActionId::PAUSE_PROGRESS => can_pause,
+						ActionId::RESUME_PROGRESS => can_resume,
+						ActionId::STOP_PROGRESS => can_stop,
+						_ => true,
+					};
 				ActionSpec {
 					id: descriptor.id,
 					group: descriptor.group,
@@ -652,7 +770,11 @@ impl Engine {
 					enabled,
 					visible: true,
 					checked: None,
-					disabled_reason: (!enabled).then_some(crate::action::DisabledReason::NoItems),
+					disabled_reason: (!enabled).then_some(if busy && activation {
+						crate::action::DisabledReason::Busy
+					} else {
+						crate::action::DisabledReason::NotApplicable
+					}),
 				}
 			})
 			.collect()
@@ -672,6 +794,18 @@ impl Engine {
 				None => Ok(outcome(vec![Effect::Frontend(FrontendRequest::Action(
 					action,
 				))])),
+			},
+			ActionId::PAUSE_PROGRESS => match first {
+				Some(item) => self.progress_action(&item, ProgressAction::Pause),
+				None => Ok(Outcome::default()),
+			},
+			ActionId::RESUME_PROGRESS => match first {
+				Some(item) => self.progress_action(&item, ProgressAction::Resume),
+				None => Ok(Outcome::default()),
+			},
+			ActionId::STOP_PROGRESS => match first {
+				Some(item) => self.progress_action(&item, ProgressAction::Stop),
+				None => Ok(Outcome::default()),
 			},
 			ActionId::REFRESH => self.dispatch(Command::Reload),
 			ActionId::GO_UP => self.dispatch(Command::GoUp),
@@ -845,7 +979,39 @@ impl Engine {
 		self.focus.item().into_iter().collect()
 	}
 
+	/// Whether OPEN has something to do for `item`: start an app or a control,
+	/// navigate, or hand it to the frontend because no handler is registered.
+	///
+	/// A frontend checks this before playing a launch animation, so an item
+	/// that cannot be opened reports that instead of animating a launch that
+	/// never happens. This mirrors `open_item`.
+	pub fn can_open(&self, item: &Item) -> bool {
+		if matches!(
+			item.kind,
+			crate::item::ItemKind::Application
+				| crate::item::ItemKind::Button
+				| crate::item::ItemKind::Toggle
+				| crate::item::ItemKind::Number
+				| crate::item::ItemKind::Radio
+		) {
+			return true;
+		}
+		if matches!(item.kind, crate::item::ItemKind::Link) && item.target.is_some() {
+			return true;
+		}
+		if item.fs_kind == crate::item::FsKind::Directory {
+			return true;
+		}
+		self.platform
+			.apps
+			.as_ref()
+			.is_some_and(|apps| apps.default_app(&item.path).is_some())
+	}
+
 	fn open_item(&mut self, item: &Item) -> Result<Outcome, Error> {
+		if item.is_busy() {
+			return Ok(Outcome::default());
+		}
 		match item.kind {
 			crate::item::ItemKind::Application
 			| crate::item::ItemKind::Button
@@ -888,6 +1054,74 @@ impl Engine {
 		Ok(outcome(vec![Effect::Frontend(FrontendRequest::OpenPath(
 			item.path.clone(),
 		))]))
+	}
+
+	fn progress_action(
+		&mut self,
+		item: &Item,
+		action: ProgressAction,
+	) -> Result<Outcome, Error> {
+		let Some(progress) = item.progress.as_ref() else {
+			return Ok(Outcome::default());
+		};
+		let handle = self.progress_jobs.get(&item.path).cloned();
+		match action {
+			ProgressAction::Pause => {
+				if let Some(handle) = &handle {
+					handle.pause();
+				} else if let Some(command) = progress.command(action) {
+					Self::spawn_progress_command(command, item)?;
+				} else {
+					return Ok(Outcome::default());
+				}
+				self.set_progress_paused(item, true);
+			}
+			ProgressAction::Resume => {
+				if let Some(handle) = &handle {
+					handle.resume();
+				} else if let Some(command) = progress.command(action) {
+					Self::spawn_progress_command(command, item)?;
+				} else {
+					return Ok(Outcome::default());
+				}
+				self.set_progress_paused(item, false);
+			}
+			ProgressAction::Stop => {
+				if let Some(handle) = &handle {
+					handle.cancel();
+				} else if let Some(command) = progress.command(action) {
+					Self::spawn_progress_command(command, item)?;
+				} else {
+					return Ok(Outcome::default());
+				}
+			}
+		}
+		Ok(outcome(vec![Effect::Reload(vec![self.folder_path()])]))
+	}
+
+	/// An external downloader owns the process; Hishell only records that the
+	/// user asked it to pause or resume, so the view updates immediately.
+	fn set_progress_paused(&self, item: &Item, paused: bool) {
+		if let Some(entry) = &item.entry_path {
+			crate::progress::set_paused(entry, paused);
+		}
+	}
+
+	fn spawn_progress_command(command: &str, item: &Item) -> Result<(), Error> {
+		let entry = item.entry_path.as_deref().unwrap_or(&item.path);
+		let args = crate::progress::expand_command(command, &item.path, entry, &item.title)
+			.map_err(Error::Config)?;
+		let Some((program, rest)) = args.split_first() else {
+			return Ok(());
+		};
+		std::process::Command::new(program)
+			.args(rest)
+			.current_dir(item.path.parent().unwrap_or(Path::new(".")))
+			.spawn()
+			.map_err(|error| {
+				Error::Config(format!("cannot run progress command: {error}"))
+			})?;
+		Ok(())
 	}
 
 	fn focus_command(&mut self, command: FocusCommand) -> Outcome {
@@ -1250,6 +1484,9 @@ fn item_subjects(item: &Item) -> ActionSubjects {
 			subjects = subjects.union(ActionSubjects::VIDEO);
 		}
 	}
+	if item.is_busy() {
+		subjects = subjects.union(ActionSubjects::PROGRESS);
+	}
 	subjects
 }
 
@@ -1316,6 +1553,51 @@ mod tests {
 
 		fn active_items(&self, _wrapper: &str) -> Vec<PathBuf> {
 			Vec::new()
+		}
+	}
+
+	struct NoApps;
+
+	impl crate::platform::AppCatalog for NoApps {
+		fn apps_for(&self, _path: &Path) -> Vec<crate::platform::AppEntry> {
+			Vec::new()
+		}
+
+		fn default_app(&self, _path: &Path) -> Option<crate::platform::AppEntry> {
+			None
+		}
+
+		fn set_default(
+			&self,
+			_mime: &str,
+			_app: &crate::execution::AppId,
+		) -> Result<(), crate::platform::PlatformError> {
+			Ok(())
+		}
+	}
+
+	struct AnyHandler;
+
+	impl crate::platform::AppCatalog for AnyHandler {
+		fn apps_for(&self, _path: &Path) -> Vec<crate::platform::AppEntry> {
+			Vec::new()
+		}
+
+		fn default_app(&self, path: &Path) -> Option<crate::platform::AppEntry> {
+			Some(crate::platform::AppEntry {
+				id: crate::execution::AppId(String::from("test.desktop")),
+				name: String::from("Test"),
+				icon: None,
+				path: path.to_path_buf(),
+			})
+		}
+
+		fn set_default(
+			&self,
+			_mime: &str,
+			_app: &crate::execution::AppId,
+		) -> Result<(), crate::platform::PlatformError> {
+			Ok(())
 		}
 	}
 
@@ -1852,6 +2134,76 @@ mod tests {
 	}
 
 	#[test]
+	fn a_busy_item_cannot_be_opened_and_offers_progress_actions() {
+		let path = temp_folder("progress-action");
+		std::fs::write(
+			path.join("movie.mkv.desktop"),
+			"[Desktop Entry]\nType=File\nName=Movie\nIcon=video-x-generic\n\
+			 [Progress]\nValue=2\nTarget=10\nTaskName=Downloading...\n\
+			 Pause=download pause %p\nResume=download resume %p\n\
+			 Stop=download stop %p\nPaused=false\n",
+		)
+		.unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		engine
+			.dispatch(Command::Focus(FocusCommand::First))
+			.unwrap();
+		let item = engine
+			.focus()
+			.and_then(|id| engine.item(id))
+			.cloned()
+			.unwrap();
+		assert!(item.is_busy());
+
+		let actions = engine.actions(&ActionRequest {
+			menu: MenuKind::Context,
+			target: Target::Focus,
+		});
+		let open = actions
+			.iter()
+			.find(|action| action.id == ActionId::OPEN)
+			.unwrap();
+		assert!(!open.enabled);
+		assert_eq!(
+			open.disabled_reason,
+			Some(crate::action::DisabledReason::Busy)
+		);
+		assert!(
+			actions
+				.iter()
+				.find(|action| action.id == ActionId::PAUSE_PROGRESS)
+				.is_some_and(|action| action.enabled)
+		);
+		assert!(
+			actions
+				.iter()
+				.find(|action| action.id == ActionId::STOP_PROGRESS)
+				.is_some_and(|action| action.enabled)
+		);
+
+		let outcome = engine.dispatch(Command::Invoke(ActionId::OPEN)).unwrap();
+		assert!(outcome.effects.is_empty());
+		assert_eq!(engine.item_at(&item.path).map(|item| item.title.as_str()), Some("Movie"));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn a_stale_hishell_progress_group_is_cleaned_on_open() {
+		let path = temp_folder("progress-stale");
+		let sidecar = path.join("movie.mkv.desktop");
+		std::fs::write(
+			&sidecar,
+			"[Desktop Entry]\nType=File\n\
+			 [Progress]\nValue=2\nTarget=10\nOwner=Hishell\n",
+		)
+		.unwrap();
+		let engine = Engine::open(&path).unwrap();
+		assert!(engine.items().is_empty());
+		assert!(!sidecar.exists());
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
 	fn launching_an_entry_returns_a_launch_effect() {
 		let path = temp_folder("launch");
 		let entry = path.join("ride.desktop");
@@ -1878,6 +2230,59 @@ mod tests {
 			outcome.effects[0],
 			Effect::Launch(LaunchOutcome::Started)
 		));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn a_file_without_a_handler_cannot_be_opened() {
+		let path = temp_folder("can-open");
+		let file = path.join("notes.txt");
+		std::fs::write(&file, b"x").unwrap();
+
+		let without = Engine::open_location_with(
+			Location::folder(&path),
+			OpenOptions {
+				deps: Deps {
+					platform: crate::platform::Platform {
+						apps: Some(Arc::new(NoApps)),
+						..crate::platform::Platform::default()
+					},
+					..Deps::default()
+				},
+				..OpenOptions::default()
+			},
+		)
+		.unwrap();
+		let item = without
+			.items()
+			.iter()
+			.find(|item| item.path == file)
+			.cloned()
+			.unwrap();
+		assert!(!without.can_open(&item));
+
+		let with_handler = Engine::open_location_with(
+			Location::folder(&path),
+			OpenOptions {
+				deps: Deps {
+					platform: crate::platform::Platform {
+						apps: Some(Arc::new(AnyHandler)),
+						..crate::platform::Platform::default()
+					},
+					..Deps::default()
+				},
+				..OpenOptions::default()
+			},
+		)
+		.unwrap();
+		let item = with_handler
+			.items()
+			.iter()
+			.find(|item| item.path == file)
+			.cloned()
+			.unwrap();
+		assert!(with_handler.can_open(&item));
+
 		std::fs::remove_dir_all(path).unwrap();
 	}
 

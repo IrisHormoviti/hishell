@@ -236,6 +236,89 @@ impl ConfigParser {
 		}
 	}
 
+	/// Replace `section` with exactly `values`, keeping every other group.
+	/// Comments and keys inside the replaced group are dropped.
+	pub fn set_section(path: &Path, section: &str, values: &[(&str, &str)]) {
+		let content = fs::read_to_string(path).unwrap_or_default();
+		let mut out = String::new();
+		let mut current: Option<String> = None;
+		let mut found = false;
+
+		for line in content.lines() {
+			let trimmed = line.trim();
+			if trimmed.starts_with('[') && trimmed.ends_with(']') {
+				let name = &trimmed[1..trimmed.len() - 1];
+				current = Some(name.to_string());
+				out.push_str(line);
+				out.push('\n');
+				if name == section {
+					found = true;
+					for (key, value) in values {
+						out.push_str(&format!("{key} = {value}\n"));
+					}
+				}
+				continue;
+			}
+			if current.as_deref() == Some(section) {
+				continue;
+			}
+			out.push_str(line);
+			out.push('\n');
+		}
+
+		if !found {
+			if !out.is_empty() && !out.ends_with('\n') {
+				out.push('\n');
+			}
+			out.push_str(&format!("[{}]\n", section));
+			for (key, value) in values {
+				out.push_str(&format!("{key} = {value}\n"));
+			}
+		}
+
+		if let Some(parent) = path.parent() {
+			let _ = fs::create_dir_all(parent);
+		}
+		if let Err(error) = fs::write(path, out) {
+			eprintln!("Failed to save config: {}", error);
+		}
+	}
+
+	/// Remove a whole group, keeping the rest of the file intact.
+	pub fn remove_section(path: &Path, section: &str) {
+		let Ok(content) = fs::read_to_string(path) else {
+			return;
+		};
+		let mut out = String::new();
+		let mut current: Option<String> = None;
+		let mut changed = false;
+
+		for line in content.lines() {
+			let trimmed = line.trim();
+			if trimmed.starts_with('[') && trimmed.ends_with(']') {
+				let name = &trimmed[1..trimmed.len() - 1];
+				current = Some(name.to_string());
+				if name == section {
+					changed = true;
+					continue;
+				}
+				out.push_str(line);
+				out.push('\n');
+				continue;
+			}
+			if current.as_deref() == Some(section) {
+				changed = true;
+				continue;
+			}
+			out.push_str(line);
+			out.push('\n');
+		}
+
+		if changed && let Err(error) = fs::write(path, out) {
+			eprintln!("Failed to save config: {}", error);
+		}
+	}
+
 	fn parse_value(s: &str) -> ConfigValue {
 		let s = s.trim();
 		if s == "true" {

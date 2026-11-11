@@ -28,6 +28,7 @@ pub mod navigation;
 pub mod ops;
 pub mod path;
 pub mod platform;
+pub mod progress;
 pub mod prompt;
 pub mod selection;
 pub mod session;
@@ -74,6 +75,7 @@ pub use platform::{
 	AppCatalog, AppEntry, FreeDesktopApps, FreeDesktopMime, Launcher, Mime, MimeResolver, Platform,
 	PlatformError, Portal, PortalState, SoundPlayer, Thumbnail, ThumbnailRequest, Thumbnailer,
 };
+pub use progress::{Progress, ProgressAction, ProgressControl};
 pub use prompt::{FrontendRequest, Notice, Prompt};
 pub use selection::{Selection, SelectionStatus};
 pub use session::{SCHEMA_VERSION, SessionData, SessionStore};
@@ -95,6 +97,7 @@ pub mod prelude {
 	pub use crate::error::Error;
 	pub use crate::item::{FsKind, IconRef, Item, ItemId, ItemKind};
 	pub use crate::location::{File, Folder, Location, LocationKind};
+	pub use crate::progress::{Progress, ProgressAction, ProgressControl};
 	pub use crate::selection::{Selection, SelectionStatus};
 	pub use crate::value::ConfigValue;
 	pub use crate::view::{

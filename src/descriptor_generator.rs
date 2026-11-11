@@ -797,6 +797,7 @@ mod tests {
 			terminal: false,
 			terminal_options: None,
 			launch_animation: None,
+			main_display: None,
 			hidden: false,
 			no_display: false,
 			toggle: false,
@@ -808,6 +809,7 @@ mod tests {
 			rename: None,
 			refresh: None,
 			custom_group: None,
+			progress: None,
 			diagnostics: Vec::new(),
 		}
 	}

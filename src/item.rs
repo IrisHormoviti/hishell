@@ -94,4 +94,13 @@ pub struct Item {
 	pub group_label: String,
 	pub is_stashed: bool,
 	pub custom_group: String,
+	/// A live download, copy or move attached to this item.
+	pub progress: Option<crate::progress::Progress>,
+}
+
+impl Item {
+	/// An item with a live task cannot be opened or entered.
+	pub fn is_busy(&self) -> bool {
+		self.progress.is_some()
+	}
 }

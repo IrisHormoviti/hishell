@@ -90,6 +90,9 @@ pub struct Entry {
 	/// Extra arguments passed to the terminal before the command.
 	pub terminal_options: Option<String>,
 	pub launch_animation: Option<String>,
+	/// `[App Display] MainDisplay`: the panel this app's first window goes to.
+	/// 0 is the top panel, 1 the bottom; absent or -1 uses the system default.
+	pub main_display: Option<i32>,
 	pub hidden: bool,
 	pub no_display: bool,
 	pub toggle: bool,
@@ -103,6 +106,8 @@ pub struct Entry {
 	pub rename: Option<String>,
 	pub refresh: Option<String>,
 	pub custom_group: Option<String>,
+	/// A live task described by the entry's `[Progress]` group.
+	pub progress: Option<crate::progress::Progress>,
 	pub diagnostics: Vec<ConfigDiagnostic>,
 }
 
@@ -159,7 +164,19 @@ impl Entry {
 		if entry_type == Some(EntryType::File) && fs_kind == FsKind::Directory {
 			diagnostics.push(diagnostic(path, "Type=File describes a directory"));
 		}
+		let progress = sections
+			.get(crate::progress::SECTION)
+			.and_then(crate::progress::Progress::from_values);
+		let app_display = sections.get("App Display");
+		let main_display = app_display
+			.and_then(|values| {
+				value_int(values, "MainDisplay").or_else(|| value_int(values, "MainScreen"))
+			})
+			.and_then(|value| i32::try_from(value).ok())
+			.filter(|value| *value >= 0);
+
 		if entry_type == Some(EntryType::File)
+			&& progress.is_none()
 			&& let Some(target) = &target
 			&& !target.is_file()
 		{
@@ -182,6 +199,7 @@ impl Entry {
 			terminal_options: string("TerminalOptions")
 				.filter(|value| !value.trim().is_empty()),
 			launch_animation: string("LaunchAnimation").filter(|value| !value.trim().is_empty()),
+			main_display,
 			hidden: value_bool(values.get("Hidden")),
 			no_display: value_bool(values.get("NoDisplay")),
 			toggle: value_bool(values.get("Toggle")),
@@ -193,6 +211,7 @@ impl Entry {
 			rename: string("Rename").filter(|command| !command.trim().is_empty()),
 			refresh: string("Refresh").filter(|command| !command.trim().is_empty()),
 			custom_group: string("Group").filter(|group| !group.trim().is_empty()),
+			progress,
 			diagnostics,
 		})
 	}
@@ -563,6 +582,21 @@ mod tests {
 		assert_eq!(entry.entry_type, Some(EntryType::Application));
 		assert_eq!(entry.exec.as_deref(), Some("ride %f"));
 		assert!(!entry.hidden);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn reads_the_main_display_from_the_app_display_group() {
+		let root = window("main-display");
+		let path = root.join("game.desktop");
+		std::fs::write(
+			&path,
+			"[Desktop Entry]\nType=Application\nName=Game\nExec=game\n\n\
+			 [App Display]\nMainDisplay=0\n",
+		)
+		.unwrap();
+		let entry = Entry::read(&path, FsKind::File).unwrap();
+		assert_eq!(entry.main_display, Some(0));
 		std::fs::remove_dir_all(root).unwrap();
 	}
 

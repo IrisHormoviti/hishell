@@ -64,6 +64,13 @@ pub trait MimeResolver: Send + Sync {
 }
 
 pub trait Thumbnailer: Send + Sync {
+	/// Whether this thumbnailer can render `path`. Frontends use it to choose
+	/// a thumbnail over an item's icon, so it must be cheap and free of I/O.
+	fn supports(&self, path: &Path) -> bool {
+		let _ = path;
+		true
+	}
+
 	fn thumbnail(&self, request: &ThumbnailRequest) -> Result<Option<Thumbnail>, PlatformError>;
 }
 

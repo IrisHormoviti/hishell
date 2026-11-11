@@ -52,10 +52,11 @@ impl Folder {
 	}
 
 	pub fn scan_with(path: &Path, options: ScanOptions) -> Self {
-		let raw_entries = read_entries(path);
+		let mut raw_entries = read_entries(path);
 
 		let mut entries: HashMap<PathBuf, Entry> = HashMap::new();
 		let mut consumed: HashSet<PathBuf> = HashSet::new();
+		let mut virtual_entries = Vec::new();
 		let mut diagnostics = Vec::new();
 
 		if options.read_entries {
@@ -80,15 +81,23 @@ impl Folder {
 							diagnostics.extend(entry.diagnostics.iter().cloned());
 							if entry.is_descriptor() {
 								if let Some(target) = &entry.target
-									&& target.is_file()
+									&& target.parent() == Some(path)
+									&& (target.is_file() || entry.progress.is_some())
 								{
+									if missing(target) {
+										virtual_entries.push(virtual_item(target));
+									}
 									entries.insert(target.clone(), entry);
 								}
 								consumed.insert(raw.path.clone());
 							} else if entry.is_sidecar() {
 								if let Some(target) = sidecar_target(&raw.path)
-									&& target.is_file()
+									&& target.parent() == Some(path)
+									&& (target.is_file() || entry.progress.is_some())
 								{
+									if missing(&target) {
+										virtual_entries.push(virtual_item(&target));
+									}
 									entries.insert(target, entry);
 								}
 								consumed.insert(raw.path.clone());
@@ -102,6 +111,7 @@ impl Folder {
 				}
 			}
 		}
+		raw_entries.extend(virtual_entries);
 
 		let mut items = Vec::new();
 		for raw in raw_entries {
@@ -135,7 +145,7 @@ impl Folder {
 				&& crate::appimage::is_appimage(&raw.path))
 			.then(|| crate::appimage::entry(&raw.path))
 			.flatten();
-			if options.read_entries && raw.fs_kind == FsKind::File {
+			if options.read_entries && raw.fs_kind == FsKind::File && raw.path.is_file() {
 				crate::descriptor_generator::request(&raw.path, path);
 			}
 			let generated = (raw.fs_kind == FsKind::File)
@@ -232,6 +242,7 @@ impl Folder {
 				custom_group: entry
 					.and_then(|entry| entry.custom_group.clone())
 					.unwrap_or_default(),
+				progress: entry.and_then(|entry| entry.progress.clone()),
 			});
 		}
 
@@ -387,6 +398,26 @@ fn is_desktop_entry(path: &Path) -> bool {
 		.is_some_and(|extension| extension.eq_ignore_ascii_case("desktop"))
 }
 
+/// Whether nothing at all exists at `path`, including a broken symlink.
+fn missing(path: &Path) -> bool {
+	std::fs::symlink_metadata(path).is_err()
+}
+
+/// A target a sidecar names before the file exists, so its progress is
+/// visible while it is being downloaded or copied.
+fn virtual_item(path: &Path) -> RawEntry {
+	RawEntry {
+		name: path
+			.file_name()
+			.map(|name| name.to_string_lossy().into_owned())
+			.unwrap_or_else(|| path.display().to_string()),
+		path: path.to_path_buf(),
+		fs_kind: FsKind::File,
+		is_symlink: false,
+		metadata: None,
+	}
+}
+
 /// `photo.png.desktop` describes `photo.png` beside it.
 fn sidecar_target(entry: &Path) -> Option<PathBuf> {
 	let name = entry.file_name()?.to_str()?;
@@ -440,5 +471,92 @@ pub fn radio_member(folder: &Path, path: &Path, config: &Config) -> bool {
 		crate::view::RadioOnly::All => true,
 		crate::view::RadioOnly::Directories => path.is_dir(),
 		crate::view::RadioOnly::Files => path.is_file(),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn tree(name: &str) -> PathBuf {
+		let root = std::env::temp_dir().join(format!(
+			"hishell-folder-progress-{name}-{}",
+			std::process::id()
+		));
+		let _ = std::fs::remove_dir_all(&root);
+		std::fs::create_dir_all(&root).unwrap();
+		root
+	}
+
+	#[test]
+	fn a_sidecar_with_progress_shows_a_missing_target() {
+		let root = tree("file");
+		std::fs::write(
+			root.join("movie.mkv.desktop"),
+			"[Desktop Entry]\nType=File\nName=Movie\nIcon=video-x-generic\n\
+			 [Progress]\nValue=5\nTarget=10\nTaskName=Downloading...\n",
+		)
+		.unwrap();
+		let folder = Folder::scan(&root);
+		assert_eq!(folder.len(), 1);
+		let item = &folder.items()[0];
+		assert_eq!(item.name, "movie.mkv");
+		assert_eq!(item.title, "Movie");
+		assert_eq!(item.fs_kind, FsKind::File);
+		assert_eq!(item.icon, IconRef::Theme(String::from("video-x-generic")));
+		assert!(item.is_busy());
+		assert_eq!(item.progress.as_ref().map(|p| p.percent()), Some(50));
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn a_sidecar_without_progress_does_not_show_a_missing_target() {
+		let root = tree("hidden");
+		std::fs::write(
+			root.join("movie.mkv.desktop"),
+			"[Desktop Entry]\nType=File\nName=Movie\n",
+		)
+		.unwrap();
+		let folder = Folder::scan(&root);
+		assert!(folder.is_empty());
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn a_sidecar_for_an_existing_directory_does_not_duplicate_the_item() {
+		let root = tree("folder-sidecar");
+		let folder_path = root.join("movie");
+		std::fs::create_dir_all(&folder_path).unwrap();
+		std::fs::write(
+			root.join("movie.desktop"),
+			"[Desktop Entry]\nType=File\nName=Movie\n\
+			 [Progress]\nValue=1\nTarget=10\n",
+		)
+		.unwrap();
+		let folder = Folder::scan(&root);
+		assert_eq!(folder.len(), 1);
+		assert_eq!(folder.items()[0].fs_kind, FsKind::Directory);
+		assert!(folder.items()[0].is_busy());
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn a_folder_directory_can_carry_progress() {
+		let root = tree("folder");
+		let folder_path = root.join("movie");
+		std::fs::create_dir_all(&folder_path).unwrap();
+		std::fs::write(
+			folder_path.join(".directory"),
+			"[Desktop Entry]\nType=Directory\nName=Movie\n\
+			 [Progress]\nValue=0\nTarget=100\nTaskName=Downloading...\n",
+		)
+		.unwrap();
+		let folder = Folder::scan(&root);
+		assert_eq!(folder.len(), 1);
+		let item = &folder.items()[0];
+		assert_eq!(item.name, "movie");
+		assert_eq!(item.title, "Movie");
+		assert!(item.is_busy());
+		std::fs::remove_dir_all(root).unwrap();
 	}
 }

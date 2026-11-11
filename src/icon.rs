@@ -8,14 +8,20 @@ use crate::item::IconRef;
 
 /// The MIME type for a path, by extension and then by content sniffing.
 pub fn mime_for_path(path: &Path) -> Option<String> {
-	if let Some(mime) = mime_guess::from_path(path).first_raw() {
-		return Some(mime.to_string());
-	}
+	let guessed = mime_guess::from_path(path).first_raw();
 	// `mime_guess` only knows common extensions. The shared MIME database
 	// covers the rest (disc images such as `.rvz`, emulator formats, ...), and
-	// is the same source the desktop uses for "Open with".
+	// is the same source the desktop uses for "Open with". It also knows
+	// container formats that `mime_guess` lumps into `application/octet-stream`
+	// (`.iso`), which would otherwise bypass the registered launcher.
+	if let Some(mime) = guessed.filter(|mime| *mime != "application/octet-stream") {
+		return Some(mime.to_string());
+	}
 	if let Some(mime) = shared_mime_for_extension(path) {
 		return Some(mime);
+	}
+	if let Some(mime) = guessed {
+		return Some(mime.to_string());
 	}
 	infer::get_from_path(path)
 		.ok()

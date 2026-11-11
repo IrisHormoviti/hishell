@@ -8,6 +8,10 @@ use crate::platform::{PlatformError, Thumbnail, ThumbnailRequest, Thumbnailer};
 pub struct FreeDesktopThumbnailer;
 
 impl Thumbnailer for FreeDesktopThumbnailer {
+	fn supports(&self, path: &Path) -> bool {
+		is_image(path)
+	}
+
 	fn thumbnail(&self, request: &ThumbnailRequest) -> Result<Option<Thumbnail>, PlatformError> {
 		if !is_image(&request.path) {
 			return Ok(None);
@@ -55,7 +59,7 @@ fn is_image(path: &Path) -> bool {
 		.is_some_and(|extension| {
 			matches!(
 				extension.to_ascii_lowercase().as_str(),
-				"png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp" | "tiff" | "ico"
+				"png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp" | "tiff"
 			)
 		})
 }
@@ -113,5 +117,12 @@ mod tests {
 				.is_none()
 		);
 		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn only_images_are_supported() {
+		assert!(FreeDesktopThumbnailer.supports(Path::new("/tmp/photo.png")));
+		assert!(FreeDesktopThumbnailer.supports(Path::new("/tmp/photo.JPG")));
+		assert!(!FreeDesktopThumbnailer.supports(Path::new("/tmp/notes.txt")));
 	}
 }

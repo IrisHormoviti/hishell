@@ -1,32 +1,61 @@
 //! Worker pool for file operations.
 
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
-use crate::ops::{JobOutcome, Op, OpKind};
+use crate::ops::{JobOutcome, Op, OpKind, ProgressSink};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct JobId(pub u64);
 
 #[derive(Clone, Debug)]
-pub struct CancelToken(Arc<AtomicBool>);
+pub struct CancelToken {
+	cancel: Arc<AtomicBool>,
+	paused: Arc<AtomicBool>,
+}
 
 impl CancelToken {
 	pub fn cancel(&self) {
-		self.0.store(true, Ordering::Relaxed);
+		self.cancel.store(true, Ordering::Relaxed);
 	}
 
 	pub fn is_cancelled(&self) -> bool {
-		self.0.load(Ordering::Relaxed)
+		self.cancel.load(Ordering::Relaxed)
+	}
+
+	pub fn pause(&self) {
+		self.paused.store(true, Ordering::Relaxed);
+	}
+
+	pub fn resume(&self) {
+		self.paused.store(false, Ordering::Relaxed);
+	}
+
+	pub fn is_paused(&self) -> bool {
+		self.paused.load(Ordering::Relaxed)
+	}
+
+	pub(crate) fn cancel_flag(&self) -> &AtomicBool {
+		&self.cancel
+	}
+
+	pub(crate) fn pause_flag(&self) -> &AtomicBool {
+		&self.paused
 	}
 }
 
 impl Default for CancelToken {
 	fn default() -> Self {
-		Self(Arc::new(AtomicBool::new(false)))
+		Self {
+			cancel: Arc::new(AtomicBool::new(false)),
+			paused: Arc::new(AtomicBool::new(false)),
+		}
 	}
 }
 
@@ -43,6 +72,18 @@ impl JobHandle {
 
 	pub fn cancel(&self) {
 		self.cancel.cancel();
+	}
+
+	pub fn pause(&self) {
+		self.cancel.pause();
+	}
+
+	pub fn resume(&self) {
+		self.cancel.resume();
+	}
+
+	pub fn is_paused(&self) -> bool {
+		self.cancel.is_paused()
 	}
 }
 
@@ -73,10 +114,80 @@ struct Job {
 	cancel: CancelToken,
 }
 
+/// Writes the destination's `[Progress]` metadata and mirrors the same values
+/// to the frontend as `JobEvent::Progress`.
+struct JobProgressSink {
+	id: JobId,
+	events: Sender<JobEvent>,
+	trackers: HashMap<PathBuf, crate::progress::Tracker>,
+	last_sent: HashMap<PathBuf, u64>,
+	last_event: HashMap<PathBuf, Instant>,
+}
+
+impl JobProgressSink {
+	fn new(id: JobId, events: Sender<JobEvent>) -> Self {
+		Self {
+			id,
+			events,
+			trackers: HashMap::new(),
+			last_sent: HashMap::new(),
+			last_event: HashMap::new(),
+		}
+	}
+}
+
+impl ProgressSink for JobProgressSink {
+	fn begin(&mut self, path: &Path, is_dir: bool, task: &str, target: u64) {
+		let tracker = crate::progress::Tracker::begin(path, is_dir, task, target);
+		self.trackers.insert(path.to_path_buf(), tracker);
+		self.last_sent.insert(path.to_path_buf(), 0);
+		self.last_event.insert(path.to_path_buf(), Instant::now());
+		let _ = self.events.send(JobEvent::Progress {
+			id: self.id,
+			done: 0,
+			total: target,
+			current: path.to_path_buf(),
+		});
+	}
+
+	fn update(&mut self, path: &Path, value: u64, total: u64) {
+		if let Some(tracker) = self.trackers.get_mut(path) {
+			tracker.update(value);
+		}
+		let now = Instant::now();
+		let last = self.last_sent.get(path).copied().unwrap_or(0);
+		let step = (total / 100).max(1);
+		let due = value >= total
+			|| value.saturating_sub(last) >= step
+			|| now
+				.duration_since(self.last_event.get(path).copied().unwrap_or(now))
+				>= std::time::Duration::from_millis(200);
+		if !due {
+			return;
+		}
+		self.last_sent.insert(path.to_path_buf(), value);
+		self.last_event.insert(path.to_path_buf(), now);
+		let _ = self.events.send(JobEvent::Progress {
+			id: self.id,
+			done: value,
+			total,
+			current: path.to_path_buf(),
+		});
+	}
+
+	fn finish(&mut self, path: &Path) {
+		self.trackers.remove(path);
+		self.last_sent.remove(path);
+		self.last_event.remove(path);
+	}
+}
+
 pub struct Jobs {
 	job_tx: Mutex<Option<Sender<Job>>>,
 	events: Receiver<JobEvent>,
 	workers: Mutex<Vec<JoinHandle<()>>>,
+	/// Outstanding tokens, so shutdown can unblock a paused worker.
+	tokens: Mutex<Vec<(JobId, CancelToken)>>,
 	next_id: AtomicU64,
 }
 
@@ -100,7 +211,13 @@ impl Jobs {
 							let _ = events.send(JobEvent::Cancelled { id: job.id });
 							continue;
 						}
-						let outcome = crate::ops::run(&job.op, &job.cancel.0);
+						let mut progress = JobProgressSink::new(job.id, events.clone());
+						let outcome = crate::ops::run_with(
+							&job.op,
+							job.cancel.cancel_flag(),
+							Some(job.cancel.pause_flag()),
+							&mut progress,
+						);
 						if outcome.cancelled {
 							let _ = events.send(JobEvent::Cancelled { id: job.id });
 						} else {
@@ -119,6 +236,7 @@ impl Jobs {
 			job_tx: Mutex::new(Some(job_tx)),
 			events,
 			workers: Mutex::new(handles),
+			tokens: Mutex::new(Vec::new()),
 			next_id: AtomicU64::new(1),
 		}
 	}
@@ -131,6 +249,10 @@ impl Jobs {
 			op,
 			cancel: cancel.clone(),
 		};
+		self.tokens
+			.lock()
+			.unwrap()
+			.push((id, cancel.clone()));
 		let sender = self.job_tx.lock().unwrap();
 		if let Some(sender) = sender.as_ref() {
 			let _ = sender.send(job);
@@ -139,10 +261,29 @@ impl Jobs {
 	}
 
 	pub fn drain(&self) -> Vec<JobEvent> {
-		self.events.try_iter().collect()
+		let events: Vec<JobEvent> = self.events.try_iter().collect();
+		let finished: HashSet<JobId> = events
+			.iter()
+			.filter_map(|event| match event {
+				JobEvent::Finished { id, .. } | JobEvent::Cancelled { id } => Some(*id),
+				_ => None,
+			})
+			.collect();
+		if !finished.is_empty() {
+			self.tokens
+				.lock()
+				.unwrap()
+				.retain(|(id, _)| !finished.contains(id));
+		}
+		events
 	}
 
 	pub fn shutdown(&self) {
+		// A paused worker waits for Resume or Stop. Closing the shell must not
+		// block joining it, so every outstanding job is cancelled first.
+		for (_, token) in self.tokens.lock().unwrap().iter() {
+			token.cancel();
+		}
 		let mut sender = self.job_tx.lock().unwrap();
 		sender.take();
 		drop(sender);
