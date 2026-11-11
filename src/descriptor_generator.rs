@@ -540,6 +540,13 @@ pub fn cached_icon_art(src: &Path) -> Option<PathBuf> {
 	topscreen_icon_art(&out)
 }
 
+/// Whether a valid generated descriptor already exists for `src`. The folder
+/// view uses this to notice descriptors that were produced after its scan, so
+/// it can reload once and pick up the generated title and icon.
+pub fn cached_descriptor(src: &Path) -> bool {
+	cached(src).is_some()
+}
+
 pub(crate) fn topscreen_icon_art(entry: &Path) -> Option<PathBuf> {
 	let (sections, _) = crate::config_parser::ConfigParser::parse_file(entry);
 	let value = match sections.get("Topscreen")?.get("IconArt")? {
