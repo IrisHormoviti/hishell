@@ -64,12 +64,16 @@ fn parse_globs2(text: &str) -> HashMap<String, String> {
 			continue;
 		}
 		let key = extension.to_ascii_lowercase();
-		let entry = best.entry(key).or_insert_with(|| (weight, mime.to_string()));
+		let entry = best
+			.entry(key)
+			.or_insert_with(|| (weight, mime.to_string()));
 		if weight > entry.0 {
 			*entry = (weight, mime.to_string());
 		}
 	}
-	best.into_iter().map(|(key, (_, mime))| (key, mime)).collect()
+	best.into_iter()
+		.map(|(key, (_, mime))| (key, mime))
+		.collect()
 }
 
 /// The themed icon name for a path.
@@ -150,7 +154,10 @@ mod tests {
 		assert_eq!(theme("text/html"), "text-html");
 		assert_eq!(theme("application/octet-stream"), "text-x-generic");
 		// Unknown application types keep their own themed icon name.
-		assert_eq!(theme("application/x-gamecube-rom"), "application-x-gamecube-rom");
+		assert_eq!(
+			theme("application/x-gamecube-rom"),
+			"application-x-gamecube-rom"
+		);
 	}
 
 	#[test]
@@ -162,7 +169,10 @@ mod tests {
 			 50:image/png:*.png\n\
 			 50:application/pdf:*.[pP][dD][fF]\n",
 		);
-		assert_eq!(globs.get("rvz").map(String::as_str), Some("application/x-wii-rom"));
+		assert_eq!(
+			globs.get("rvz").map(String::as_str),
+			Some("application/x-wii-rom")
+		);
 		assert_eq!(globs.get("png").map(String::as_str), Some("image/png"));
 		assert!(!globs.contains_key("pdf"));
 	}

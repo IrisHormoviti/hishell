@@ -87,11 +87,11 @@ fn roots() -> Vec<PathBuf> {
 		roots.push(PathBuf::from("/usr/local/share/hishell/directories"));
 		roots.push(PathBuf::from("/usr/share/hishell/directories"));
 	}
-	if let Some(dir) = dirs::data_dir() {
-		roots.push(dir.join("hishell/directories"));
-	}
 	if let Some(cache) = dirs::cache_dir() {
 		roots.push(cache.join("hishell/descriptors"));
+	}
+	if let Some(dir) = dirs::data_dir() {
+		roots.push(dir.join("hishell/directories"));
 	}
 	roots.push(PathBuf::from(RUNTIME_ROOT));
 	roots

@@ -17,8 +17,7 @@ pub const SECTION: &str = "Progress";
 /// Paths a tracker in this process is currently writing. Two engines in one
 /// process share this, so one opening a folder cannot clear the other's live
 /// transfer. It dies with the process, which makes abandoned groups stale.
-static ACTIVE: LazyLock<Mutex<HashSet<PathBuf>>> =
-	LazyLock::new(|| Mutex::new(HashSet::new()));
+static ACTIVE: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// A transfer worker updates `Value` while the engine writes `Paused` for the
 /// same sidecar. Serialize those read-modify-write passes so neither loses the
@@ -50,9 +49,7 @@ pub fn set_paused(path: &Path, paused: bool) {
 }
 
 pub fn is_active(path: &Path) -> bool {
-	ACTIVE
-		.lock()
-		.is_ok_and(|active| active.contains(path))
+	ACTIVE.lock().is_ok_and(|active| active.contains(path))
 }
 
 fn mark_active(path: &Path) {
@@ -186,7 +183,9 @@ pub fn expand_command(
 				Some('k') => expanded.push_str(&entry),
 				Some('n' | 'c') => expanded.push_str(name),
 				Some(other) => {
-					return Err(format!("unsupported field code %{other} in progress command"));
+					return Err(format!(
+						"unsupported field code %{other} in progress command"
+					));
 				}
 				None => {
 					return Err(String::from(
@@ -255,11 +254,7 @@ fn section_text(text: &str, section: &str) -> Option<String> {
 ///
 /// A folder transfer uses this to install the source's own `.directory` over
 /// the progress file it created, without dropping the `[Progress]` group.
-pub fn merge_section_file(
-	source: &Path,
-	target: &Path,
-	section: &str,
-) -> std::io::Result<usize> {
+pub fn merge_section_file(source: &Path, target: &Path, section: &str) -> std::io::Result<usize> {
 	let _guard = WRITE_LOCK.lock();
 	let mut text = strip_section(&std::fs::read_to_string(source)?, section);
 	if let Ok(existing) = std::fs::read_to_string(target)
@@ -422,7 +417,10 @@ mod tests {
 		let values = HashMap::from([
 			(String::from("Value"), ConfigValue::Number(42.0)),
 			(String::from("Target"), ConfigValue::Number(100.0)),
-			(String::from("TaskName"), ConfigValue::String(String::from("Downloading..."))),
+			(
+				String::from("TaskName"),
+				ConfigValue::String(String::from("Downloading...")),
+			),
 			(
 				String::from("Pause"),
 				ConfigValue::String(String::from("download pause %p")),
@@ -473,8 +471,7 @@ mod tests {
 
 	#[test]
 	fn a_tracker_writes_updates_and_removes_its_sidecar() {
-		let root =
-			std::env::temp_dir().join(format!("hishell-progress-{}", std::process::id()));
+		let root = std::env::temp_dir().join(format!("hishell-progress-{}", std::process::id()));
 		let _ = std::fs::remove_dir_all(&root);
 		std::fs::create_dir_all(&root).unwrap();
 		let item = root.join("movie.mkv");

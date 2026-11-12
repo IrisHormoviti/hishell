@@ -141,28 +141,28 @@ config_keys! {
 /// How opening a folder changes the current view.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NavigationType {
-    /// Replace the view in place; Back walks the folder stack.
-    #[default]
-    InPlace,
-    /// Open a floating window rooted at the folder; Back closes it at its root.
-    Window,
+	/// Replace the view in place; Back walks the folder stack.
+	#[default]
+	InPlace,
+	/// Open a floating window rooted at the folder; Back closes it at its root.
+	Window,
 }
 
 impl NavigationType {
-    pub fn as_key(self) -> &'static str {
-        match self {
-            Self::InPlace => "IN_PLACE",
-            Self::Window => "WINDOW",
-        }
-    }
+	pub fn as_key(self) -> &'static str {
+		match self {
+			Self::InPlace => "IN_PLACE",
+			Self::Window => "WINDOW",
+		}
+	}
 
-    pub fn from_key(value: &str) -> Option<Self> {
-        match value.to_ascii_uppercase().as_str() {
-            "IN_PLACE" | "INPLACE" => Some(Self::InPlace),
-            "WINDOW" => Some(Self::Window),
-            _ => None,
-        }
-    }
+	pub fn from_key(value: &str) -> Option<Self> {
+		match value.to_ascii_uppercase().as_str() {
+			"IN_PLACE" | "INPLACE" => Some(Self::InPlace),
+			"WINDOW" => Some(Self::Window),
+			_ => None,
+		}
+	}
 }
 
 /// What a drop into a folder does when the destination does not mandate the
@@ -413,12 +413,8 @@ impl Config {
 			ConfigKey::SmoothScrolling => ConfigValue::Bool(self.smooth_scrolling),
 			ConfigKey::OpenOnClick => ConfigValue::Bool(self.open_on_click),
 			ConfigKey::FocusEmptySlots => ConfigValue::Bool(self.focus_empty_slots),
-			ConfigKey::DropItemPreference => {
-				ConfigValue::Str(self.drop_preference.as_key().into())
-			}
-			ConfigKey::DropItemPreferenceMandate => {
-				ConfigValue::Bool(self.drop_preference_mandate)
-			}
+			ConfigKey::DropItemPreference => ConfigValue::Str(self.drop_preference.as_key().into()),
+			ConfigKey::DropItemPreferenceMandate => ConfigValue::Bool(self.drop_preference_mandate),
 			ConfigKey::RadioEnabled => ConfigValue::Bool(self.radio_enabled),
 			ConfigKey::RadioOnly => ConfigValue::Str(self.radio_only.as_key().into()),
 			ConfigKey::RadioSelected => ConfigValue::Str(self.radio_selected.clone()),
@@ -793,7 +789,10 @@ mod tests {
 		}
 
 		config
-			.set(ConfigKey::DropItemPreferenceMandate, ConfigValue::Bool(true))
+			.set(
+				ConfigKey::DropItemPreferenceMandate,
+				ConfigValue::Bool(true),
+			)
 			.unwrap();
 		assert!(config.drop_preference_mandate);
 
@@ -801,7 +800,10 @@ mod tests {
 		// it is rejected rather than silently treated as MOVE.
 		assert!(
 			config
-				.set(ConfigKey::DropItemPreference, ConfigValue::Str("ASK".into()))
+				.set(
+					ConfigKey::DropItemPreference,
+					ConfigValue::Str("ASK".into())
+				)
 				.is_err()
 		);
 	}

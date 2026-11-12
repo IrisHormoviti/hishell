@@ -196,8 +196,7 @@ impl Entry {
 			icon: string("Icon").filter(|icon| !icon.is_empty()),
 			exec,
 			terminal: value_bool(values.get("Terminal")),
-			terminal_options: string("TerminalOptions")
-				.filter(|value| !value.trim().is_empty()),
+			terminal_options: string("TerminalOptions").filter(|value| !value.trim().is_empty()),
 			launch_animation: string("LaunchAnimation").filter(|value| !value.trim().is_empty()),
 			main_display,
 			hidden: value_bool(values.get("Hidden")),
@@ -309,11 +308,7 @@ impl Entry {
 
 	/// Expand a provider command: `%v` is the new value, `%n` the display
 	/// name, `%p` the item path, `%k` the entry path and `%c` the name.
-	fn hook_args(
-		&self,
-		command: &str,
-		value: Option<&str>,
-	) -> Result<Vec<String>, String> {
+	fn hook_args(&self, command: &str, value: Option<&str>) -> Result<Vec<String>, String> {
 		expand_hook(
 			command,
 			value,
@@ -643,7 +638,12 @@ mod tests {
 		);
 		assert_eq!(
 			entry.destroy_args().unwrap(),
-			vec!["provider", "destroy", "Device", path.to_string_lossy().as_ref()]
+			vec![
+				"provider",
+				"destroy",
+				"Device",
+				path.to_string_lossy().as_ref()
+			]
 		);
 		assert_eq!(
 			entry.reset_args().unwrap(),
@@ -689,10 +689,7 @@ mod tests {
 		)
 		.unwrap();
 		let entry = Entry::read(&number, FsKind::File).unwrap();
-		assert_eq!(
-			entry.control_args(&[3, 7]).unwrap(),
-			vec!["set", "3", "7"]
-		);
+		assert_eq!(entry.control_args(&[3, 7]).unwrap(), vec!["set", "3", "7"]);
 		std::fs::remove_dir_all(root).unwrap();
 	}
 

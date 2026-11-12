@@ -256,7 +256,9 @@ fn default_application(mime: &str) -> Option<String> {
 	// also allows it beside the applications it names. ClamOS writes its
 	// libretro defaults to $XDG_DATA_HOME/clam-libretro/applications, which is
 	// on XDG_DATA_DIRS; the user's own config directories still win.
-	let config_lists = config_dirs().into_iter().map(|dir| dir.join("mimeapps.list"));
+	let config_lists = config_dirs()
+		.into_iter()
+		.map(|dir| dir.join("mimeapps.list"));
 	let data_lists = data_home_dirs()
 		.into_iter()
 		.map(|dir| dir.join("applications/mimeapps.list"));

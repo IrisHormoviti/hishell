@@ -23,9 +23,9 @@ use crate::folder::{Folder, ScanOptions};
 use crate::history::{History, HistoryCommand, HistoryEntry, HistoryStatus};
 use crate::item::{Item, ItemId};
 use crate::jobs::{JobEvent, JobHandle, JobId, Jobs};
-use crate::progress::{ProgressAction, ProgressControl};
 use crate::location::Location;
 use crate::navigation::{NavigationPlan, NavigationRequest, PathRelation, SlotAnchor, relation};
+use crate::progress::{ProgressAction, ProgressControl};
 use crate::prompt::{FrontendRequest, Prompt};
 use crate::selection::Selection;
 use crate::view::{
@@ -302,7 +302,9 @@ impl Engine {
 				paused,
 			});
 		}
-		item.progress.as_ref().map(crate::progress::Progress::control)
+		item.progress
+			.as_ref()
+			.map(crate::progress::Progress::control)
 	}
 
 	pub fn progress_paused(&self, path: &Path) -> bool {
@@ -345,10 +347,7 @@ impl Engine {
 		}
 		for (path, entry, is_file) in stale {
 			crate::progress::remove_section(&entry, crate::progress::SECTION);
-			if is_file
-				&& !path.exists()
-				&& !crate::progress::has_meaningful_keys(&entry)
-			{
+			if is_file && !path.exists() && !crate::progress::has_meaningful_keys(&entry) {
 				let _ = std::fs::remove_file(&entry);
 			}
 		}
@@ -644,8 +643,7 @@ impl Engine {
 				}
 				JobEvent::Finished { id, .. } | JobEvent::Cancelled { id } => {
 					self.running_jobs.remove(id);
-					self.progress_jobs
-						.retain(|_, handle| handle.id() != *id);
+					self.progress_jobs.retain(|_, handle| handle.id() != *id);
 				}
 				JobEvent::Started { .. } => {}
 			}
@@ -887,13 +885,9 @@ impl Engine {
 					if value.is_empty() {
 						return Ok(Outcome::default());
 					}
-					let delta = self.config.set_raw(
-						&self.location,
-						"Radio",
-						"Selected",
-						&value,
-						true,
-					)?;
+					let delta =
+						self.config
+							.set_raw(&self.location, "Radio", "Selected", &value, true)?;
 					let folder = self.apply_config_change(delta.scope);
 					self.revision += 1;
 					let exec = self.config.radio_exec.clone();
@@ -906,14 +900,12 @@ impl Engine {
 						..Outcome::default()
 					};
 					if !exec.trim().is_empty() {
-						let launch = self.dispatch(Command::Launch(
-							LaunchRequest::Radio {
-								exec,
-								value,
-								name: item.title.clone(),
-								path: item.path.clone(),
-							},
-						))?;
+						let launch = self.dispatch(Command::Launch(LaunchRequest::Radio {
+							exec,
+							value,
+							name: item.title.clone(),
+							path: item.path.clone(),
+						}))?;
 						outcome.effects.extend(launch.effects);
 					}
 					Ok(outcome)
@@ -936,8 +928,8 @@ impl Engine {
 					} else {
 						crate::item::FsKind::File
 					};
-					let has_exec = crate::entry::Entry::read(&entry_path, kind)
-						.is_some_and(|entry| {
+					let has_exec =
+						crate::entry::Entry::read(&entry_path, kind).is_some_and(|entry| {
 							entry
 								.exec
 								.as_deref()
@@ -1056,11 +1048,7 @@ impl Engine {
 		))]))
 	}
 
-	fn progress_action(
-		&mut self,
-		item: &Item,
-		action: ProgressAction,
-	) -> Result<Outcome, Error> {
+	fn progress_action(&mut self, item: &Item, action: ProgressAction) -> Result<Outcome, Error> {
 		let Some(progress) = item.progress.as_ref() else {
 			return Ok(Outcome::default());
 		};
@@ -1118,9 +1106,7 @@ impl Engine {
 			.args(rest)
 			.current_dir(item.path.parent().unwrap_or(Path::new(".")))
 			.spawn()
-			.map_err(|error| {
-				Error::Config(format!("cannot run progress command: {error}"))
-			})?;
+			.map_err(|error| Error::Config(format!("cannot run progress command: {error}")))?;
 		Ok(())
 	}
 
@@ -1520,9 +1506,9 @@ impl std::fmt::Debug for Engine {
 mod tests {
 	use super::*;
 	use crate::action::MenuKind;
+	use crate::config::ConfigKey;
 	use crate::focus::Direction;
 	use crate::view::PaneId;
-	use crate::config::ConfigKey;
 
 	struct AcceptAll;
 
@@ -2011,10 +1997,7 @@ mod tests {
 		// the cell it was in.
 		engine
 			.dispatch(Command::SetFreePositions {
-				positions: vec![
-					(String::from("b"), 0, 0),
-					(String::from("a"), 1, 0),
-				],
+				positions: vec![(String::from("b"), 0, 0), (String::from("a"), 1, 0)],
 			})
 			.unwrap();
 
@@ -2183,7 +2166,10 @@ mod tests {
 
 		let outcome = engine.dispatch(Command::Invoke(ActionId::OPEN)).unwrap();
 		assert!(outcome.effects.is_empty());
-		assert_eq!(engine.item_at(&item.path).map(|item| item.title.as_str()), Some("Movie"));
+		assert_eq!(
+			engine.item_at(&item.path).map(|item| item.title.as_str()),
+			Some("Movie")
+		);
 		std::fs::remove_dir_all(path).unwrap();
 	}
 
@@ -2465,9 +2451,7 @@ mod tests {
 				path: toggle.clone(),
 			}))
 			.unwrap();
-		let outcome = engine
-			.dispatch(Command::Invoke(ActionId::TOGGLE))
-			.unwrap();
+		let outcome = engine.dispatch(Command::Invoke(ActionId::TOGGLE)).unwrap();
 		assert!(matches!(outcome.effects.first(), Some(Effect::Launch(_))));
 		// The provider owns the stored state.
 		let text = std::fs::read_to_string(&toggle).unwrap();

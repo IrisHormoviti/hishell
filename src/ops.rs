@@ -496,7 +496,8 @@ impl CopyContext<'_> {
 		}
 		self.started = true;
 		self.dir_progress = is_dir;
-		self.progress.begin(&self.root, is_dir, self.task, self.total);
+		self.progress
+			.begin(&self.root, is_dir, self.task, self.total);
 	}
 
 	fn add(&mut self, bytes: u64) {
@@ -660,12 +661,8 @@ fn copy_directory_entry(
 	target: &Path,
 	context: &mut CopyContext,
 ) -> Result<(), OpError> {
-	let written = crate::progress::merge_section_file(
-		source,
-		target,
-		crate::progress::SECTION,
-	)
-	.map_err(io_error)?;
+	let written = crate::progress::merge_section_file(source, target, crate::progress::SECTION)
+		.map_err(io_error)?;
 	context.add(written as u64);
 	Ok(())
 }
@@ -975,14 +972,17 @@ mod tests {
 		let root = tree("move-self");
 		let source = root.join("a.txt");
 		fs::write(&source, b"keep me").unwrap();
-		run(&Op::Move {
-			sources: vec![source.clone()],
-			dest: root.clone(),
-			options: CopyOptions {
-				overwrite: Overwrite::Replace,
-				..CopyOptions::default()
+		run(
+			&Op::Move {
+				sources: vec![source.clone()],
+				dest: root.clone(),
+				options: CopyOptions {
+					overwrite: Overwrite::Replace,
+					..CopyOptions::default()
+				},
 			},
-		}, &AtomicBool::new(false));
+			&AtomicBool::new(false),
+		);
 		assert_eq!(fs::read(&source).unwrap(), b"keep me");
 		fs::remove_dir_all(root).unwrap();
 	}
@@ -1073,9 +1073,8 @@ mod tests {
 	impl ProgressSink for TrackingSink {
 		fn begin(&mut self, path: &Path, is_dir: bool, task: &str, target: u64) {
 			let tracker = crate::progress::Tracker::begin(path, is_dir, task, target);
-			self.sidecar_at_begin.push(
-				crate::progress::entry_path(path, is_dir).is_file(),
-			);
+			self.sidecar_at_begin
+				.push(crate::progress::entry_path(path, is_dir).is_file());
 			self.begun.push(path.to_path_buf());
 			self.trackers.insert(path.to_path_buf(), tracker);
 		}

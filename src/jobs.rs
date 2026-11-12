@@ -159,8 +159,7 @@ impl ProgressSink for JobProgressSink {
 		let step = (total / 100).max(1);
 		let due = value >= total
 			|| value.saturating_sub(last) >= step
-			|| now
-				.duration_since(self.last_event.get(path).copied().unwrap_or(now))
+			|| now.duration_since(self.last_event.get(path).copied().unwrap_or(now))
 				>= std::time::Duration::from_millis(200);
 		if !due {
 			return;
@@ -249,10 +248,7 @@ impl Jobs {
 			op,
 			cancel: cancel.clone(),
 		};
-		self.tokens
-			.lock()
-			.unwrap()
-			.push((id, cancel.clone()));
+		self.tokens.lock().unwrap().push((id, cancel.clone()));
 		let sender = self.job_tx.lock().unwrap();
 		if let Some(sender) = sender.as_ref() {
 			let _ = sender.send(job);

@@ -27,12 +27,20 @@ pub struct AppId(pub String);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchRequest {
-	Item { path: PathBuf },
-	App { path: PathBuf, app: AppId },
+	Item {
+		path: PathBuf,
+	},
+	App {
+		path: PathBuf,
+		app: AppId,
+	},
 	/// Run a `Type=Toggle` or `Type=Number` provider command. An empty
 	/// `values` means the toggle target (on/off); otherwise `%1`, `%2`, …
 	/// are replaced by the dialog values.
-	Control { path: PathBuf, values: Vec<i64> },
+	Control {
+		path: PathBuf,
+		values: Vec<i64>,
+	},
 	/// Run a folder's `[Radio] Exec` after a choice is selected. `%v`, `%n`
 	/// and `%p` expand to the value, display name and path.
 	Radio {
@@ -452,7 +460,9 @@ impl Execution {
 	}
 
 	fn terminal_command(&self) -> (String, Vec<String>) {
-		if let Some(value) = std::env::var("TERMINAL").ok().filter(|value| !value.trim().is_empty())
+		if let Some(value) = std::env::var("TERMINAL")
+			.ok()
+			.filter(|value| !value.trim().is_empty())
 			&& let Some((program, args)) = terminal_config_command(&value)
 			&& self.spawner.command_exists(&program)
 		{
@@ -472,7 +482,12 @@ impl Execution {
 		(String::from("konsole"), Vec::new())
 	}
 
-	fn terminal_request(&self, program: &str, args: &[String], options: Option<&str>) -> (String, Vec<String>) {
+	fn terminal_request(
+		&self,
+		program: &str,
+		args: &[String],
+		options: Option<&str>,
+	) -> (String, Vec<String>) {
 		let (terminal, terminal_args) = self.terminal_command();
 		let options: Vec<String> = options
 			.map(|value| value.split_whitespace().map(String::from).collect())
@@ -508,11 +523,7 @@ impl Execution {
 			return Err(LaunchError::Exec(String::from("empty Exec")));
 		};
 		let (program, args) = if entry.terminal {
-			self.terminal_request(
-				&program,
-				&args[1..],
-				entry.terminal_options.as_deref(),
-			)
+			self.terminal_request(&program, &args[1..], entry.terminal_options.as_deref())
 		} else {
 			(program, args[1..].to_vec())
 		};
@@ -562,9 +573,7 @@ impl Execution {
 		item: &Path,
 		values: &[i64],
 	) -> Result<SpawnRequest, LaunchError> {
-		let args = entry
-			.control_args(values)
-			.map_err(LaunchError::Exec)?;
+		let args = entry.control_args(values).map_err(LaunchError::Exec)?;
 		let Some(program) = args.first().cloned() else {
 			return Err(LaunchError::Exec(String::from("empty Exec")));
 		};
@@ -936,22 +945,10 @@ mod tests {
 		assert_eq!(program, "konsole");
 		assert_eq!(args, vec!["--hold", "-e", "micro", "notes.txt"]);
 
-		let (_, args) = terminal_launch(
-			"gnome-terminal",
-			Vec::new(),
-			&[],
-			"micro",
-			&[],
-		);
+		let (_, args) = terminal_launch("gnome-terminal", Vec::new(), &[], "micro", &[]);
 		assert_eq!(args, vec!["--", "micro"]);
 
-		let (_, args) = terminal_launch(
-			"wezterm",
-			Vec::new(),
-			&[],
-			"micro",
-			&[],
-		);
+		let (_, args) = terminal_launch("wezterm", Vec::new(), &[], "micro", &[]);
 		assert_eq!(args, vec!["start", "--", "micro"]);
 	}
 
