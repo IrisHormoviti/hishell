@@ -160,33 +160,45 @@ mod tests {
 	#[test]
 	fn a_descriptor_names_its_target() {
 		let (target, descriptor) = parse(
-			"[Desktop Entry]\nType=Directory\nPath=/mnt/sdcard\nName=SD Card\n\
-			 Icon=media-flash-sd-mmc\nComment=Removable\n",
+			"[Desktop Entry]\nType=Directory\nPath=/mnt/sdcard\nName=microSD card\n\
+			 Icon=media-flash-microsd\nComment=Removable\n",
 			Path::new("/usr/share/hishell/directories/sd.desktop"),
 		)
 		.unwrap();
 		assert_eq!(target, PathBuf::from("/mnt/sdcard"));
-		assert_eq!(descriptor.name.as_deref(), Some("SD Card"));
+		assert_eq!(descriptor.name.as_deref(), Some("microSD card"));
 		assert_eq!(descriptor.comment.as_deref(), Some("Removable"));
 		assert_eq!(
 			descriptor.icon_ref(),
 			Some(crate::item::IconRef::Theme(String::from(
-				"media-flash-sd-mmc"
+				"media-flash-microsd"
 			)))
 		);
 	}
 
 	#[test]
+	fn a_quoted_numeric_name_is_still_a_name() {
+		let (_, descriptor) = parse(
+			"[Desktop Entry]\nType=Directory\nPath=/mnt/sdcard\nName=\"2024\"\n\
+			 Comment=microSD card\n",
+			Path::new("/usr/share/hishell/directories/sd.desktop"),
+		)
+		.unwrap();
+		assert_eq!(descriptor.name.as_deref(), Some("2024"));
+		assert_eq!(descriptor.comment.as_deref(), Some("microSD card"));
+	}
+
+	#[test]
 	fn a_descriptor_expands_its_unmount_command() {
 		let (target, descriptor) = parse(
-			"[Desktop Entry]\nType=Directory\nPath=/mnt/sdcard\nName=SD Card\n\
+			"[Desktop Entry]\nType=Directory\nPath=/mnt/sdcard\nName=microSD card\n\
 			 Unmount=provider unmount %n %p\n",
 			Path::new("/usr/share/hishell/directories/sd.desktop"),
 		)
 		.unwrap();
 		assert_eq!(
 			descriptor.unmount_args(&target).unwrap(),
-			vec!["provider", "unmount", "SD Card", "/mnt/sdcard"]
+			vec!["provider", "unmount", "microSD card", "/mnt/sdcard"]
 		);
 	}
 
@@ -195,13 +207,13 @@ mod tests {
 		let root = std::env::temp_dir().join(format!("hishell-descriptor-{}", std::process::id()));
 		let _ = std::fs::remove_dir_all(&root);
 		let descriptors = root.join("directories");
-		let target = root.join("SD Card");
+		let target = root.join("microSD card");
 		std::fs::create_dir_all(&descriptors).unwrap();
 		std::fs::create_dir_all(&target).unwrap();
 		std::fs::write(
 			descriptors.join("sd.desktop"),
 			format!(
-				"[Desktop Entry]\nType=Directory\nPath={}\nName=SD Card\n",
+				"[Desktop Entry]\nType=Directory\nPath={}\nName=microSD card\n",
 				target.display()
 			),
 		)
@@ -211,7 +223,7 @@ mod tests {
 		let key = target.canonicalize().unwrap();
 		assert_eq!(
 			map.get(&key).and_then(|entry| entry.name.as_deref()),
-			Some("SD Card")
+			Some("microSD card")
 		);
 		std::fs::remove_dir_all(root).unwrap();
 	}
