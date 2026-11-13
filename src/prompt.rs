@@ -25,6 +25,9 @@ pub enum Prompt {
 	Number {
 		path: PathBuf,
 	},
+	Text {
+		path: PathBuf,
+	},
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

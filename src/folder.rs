@@ -228,6 +228,15 @@ impl Folder {
 				number_value: entry
 					.map(|entry| entry.number_value.clone())
 					.unwrap_or_default(),
+				number_fields: entry
+					.map(|entry| entry.number_fields.clone())
+					.unwrap_or_default(),
+				text_value: entry
+					.map(|entry| entry.text_value.clone())
+					.unwrap_or_default(),
+				text_placeholder: entry
+					.and_then(|entry| entry.text_placeholder.clone())
+					.unwrap_or_default(),
 				size: raw
 					.metadata
 					.as_ref()

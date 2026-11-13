@@ -41,6 +41,12 @@ pub enum LaunchRequest {
 		path: PathBuf,
 		values: Vec<i64>,
 	},
+	/// Run a `Type=Text` provider command. `%v` is replaced by the text the
+	/// user entered.
+	Text {
+		path: PathBuf,
+		value: String,
+	},
 	/// Run a folder's `[Radio] Exec` after a choice is selected. `%v`, `%n`
 	/// and `%p` expand to the value, display name and path.
 	Radio {
@@ -105,6 +111,10 @@ pub struct SpawnRequest {
 	pub name: String,
 	pub cwd: Option<PathBuf>,
 	pub animation: String,
+	/// Whether this spawn tells the compositor a launch is starting. Control,
+	/// text and radio commands change a setting; they are not launches, so they
+	/// must not wash the screens or hold the shell down.
+	pub announce: bool,
 	pub screen: Option<String>,
 	/// `[App Display] MainDisplay`; becomes the compositor's panel hint.
 	pub main_display: Option<i32>,
@@ -194,7 +204,10 @@ impl Spawner for FreeDesktopSpawner {
 		if let Some(cwd) = &request.cwd {
 			command.current_dir(cwd);
 		}
-		let marker = announce_launch(&request.animation, &request.item);
+		let marker = request
+			.announce
+			.then(|| announce_launch(&request.animation, &request.item))
+			.flatten();
 		match command.spawn() {
 			Ok(_) => Ok(()),
 			Err(error) => {
@@ -423,6 +436,22 @@ impl Execution {
 				};
 				self.control_request(&entry, &path, &values)
 			}
+			LaunchRequest::Text { path, value } => {
+				let entry_path = if path.is_dir() {
+					path.join(".directory")
+				} else {
+					path.clone()
+				};
+				let kind = if path.is_dir() {
+					FsKind::Directory
+				} else {
+					FsKind::File
+				};
+				let Some(entry) = Entry::read(&entry_path, kind) else {
+					return Err(LaunchError::NotExecutable(path));
+				};
+				self.text_request(&entry, &path, &value)
+			}
 			LaunchRequest::Radio {
 				exec,
 				value,
@@ -450,6 +479,7 @@ impl Execution {
 					name,
 					cwd: path.parent().map(Path::to_path_buf),
 					animation: String::new(),
+					announce: false,
 					screen: self.screen.clone(),
 					main_display: None,
 					through_wrapper: false,
@@ -506,6 +536,7 @@ impl Execution {
 			| Some(EntryType::Button)
 			| Some(EntryType::Toggle)
 			| Some(EntryType::Number)
+			| Some(EntryType::Text)
 			| Some(EntryType::Radio) => file.map(Path::to_path_buf),
 			Some(EntryType::File) => Some(
 				file.or(entry.target.as_deref())
@@ -560,6 +591,7 @@ impl Execution {
 				.unwrap_or_default(),
 			cwd: entry.path.parent().map(Path::to_path_buf),
 			animation,
+			announce: true,
 			screen: self.screen.clone(),
 			main_display: entry.main_display,
 			through_wrapper,
@@ -591,10 +623,43 @@ impl Execution {
 				.unwrap_or_default(),
 			cwd: entry.path.parent().map(Path::to_path_buf),
 			animation: String::new(),
+			announce: false,
 			screen: self.screen.clone(),
 			main_display: entry.main_display,
 			// Controls talk to their provider directly; the execution wrapper
 			// is for launching applications.
+			through_wrapper: false,
+			track_active: false,
+		})
+	}
+
+	fn text_request(
+		&self,
+		entry: &Entry,
+		item: &Path,
+		value: &str,
+	) -> Result<SpawnRequest, LaunchError> {
+		let args = entry.text_args(value).map_err(LaunchError::Exec)?;
+		let Some(program) = args.first().cloned() else {
+			return Err(LaunchError::Exec(String::from("empty Exec")));
+		};
+		Ok(SpawnRequest {
+			program,
+			args: args[1..].to_vec(),
+			item: item.to_path_buf(),
+			name: entry
+				.name
+				.clone()
+				.or_else(|| {
+					item.file_name()
+						.map(|name| name.to_string_lossy().into_owned())
+				})
+				.unwrap_or_default(),
+			cwd: entry.path.parent().map(Path::to_path_buf),
+			animation: String::new(),
+			announce: false,
+			screen: self.screen.clone(),
+			main_display: entry.main_display,
 			through_wrapper: false,
 			track_active: false,
 		})
@@ -834,6 +899,10 @@ mod tests {
 		assert_eq!(spawned.len(), 1);
 		assert_eq!(spawned[0].0, None);
 		assert_eq!(spawned[0].1.program, "ride");
+		assert!(
+			spawned[0].1.announce,
+			"an application launch reaches the compositor"
+		);
 		std::fs::remove_dir_all(root).unwrap();
 	}
 
@@ -869,6 +938,10 @@ mod tests {
 		assert_eq!(spawned.len(), 1);
 		assert!(!spawned[0].1.through_wrapper);
 		assert!(!spawned[0].1.track_active);
+		assert!(
+			!spawned[0].1.announce,
+			"a control must not wash the screens"
+		);
 		assert_eq!(spawned[0].1.program, "set");
 		assert_eq!(spawned[0].1.args, vec!["3", "7"]);
 		assert!(execution.active_items().is_empty());
@@ -899,6 +972,34 @@ mod tests {
 			vec!["one", "One", choice.to_string_lossy().as_ref()]
 		);
 		assert!(!spawned[0].1.track_active);
+		assert!(
+			!spawned[0].1.announce,
+			"a radio change must not wash the screens"
+		);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn a_text_command_does_not_announce_a_launch() {
+		let root = tree("text");
+		let entry = root.join("name.desktop");
+		std::fs::write(
+			&entry,
+			"[Desktop Entry]\nType=Text\nName=Name\nExec=set-name %v\n",
+		)
+		.unwrap();
+		let spawner = Arc::new(FakeSpawner::default());
+		let mut execution = Execution::new(None, None, spawner.clone(), Arc::new(SystemClock));
+		let outcome = execution
+			.request(LaunchRequest::Text {
+				path: entry,
+				value: String::from("Clam"),
+			})
+			.unwrap();
+		assert_eq!(outcome, LaunchOutcome::Started);
+		let spawned = spawner.spawned.lock().unwrap();
+		assert_eq!(spawned[0].1.args, vec!["Clam"]);
+		assert!(!spawned[0].1.announce);
 		std::fs::remove_dir_all(root).unwrap();
 	}
 
@@ -964,6 +1065,7 @@ mod tests {
 				name: String::new(),
 				cwd: None,
 				animation: String::new(),
+				announce: false,
 				screen: None,
 				main_display: Some(0),
 				through_wrapper: false,

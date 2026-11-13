@@ -880,72 +880,11 @@ impl Engine {
 				None => Ok(Outcome::default()),
 			},
 			ActionId::RADIO => match first {
-				Some(item) => {
-					let value = crate::folder::radio_value(&item.path);
-					if value.is_empty() {
-						return Ok(Outcome::default());
-					}
-					let delta =
-						self.config
-							.set_raw(&self.location, "Radio", "Selected", &value, true)?;
-					let folder = self.apply_config_change(delta.scope);
-					self.revision += 1;
-					let exec = self.config.radio_exec.clone();
-					let mut outcome = Outcome {
-						changes: ChangeSet {
-							config: vec![delta],
-							folder,
-							..ChangeSet::default()
-						},
-						..Outcome::default()
-					};
-					if !exec.trim().is_empty() {
-						let launch = self.dispatch(Command::Launch(LaunchRequest::Radio {
-							exec,
-							value,
-							name: item.title.clone(),
-							path: item.path.clone(),
-						}))?;
-						outcome.effects.extend(launch.effects);
-					}
-					Ok(outcome)
-				}
+				Some(item) => self.select_radio(&item),
 				None => Ok(Outcome::default()),
 			},
 			ActionId::TOGGLE => match first {
-				Some(item) => {
-					// A provider-owned toggle runs its Exec with the target
-					// state and writes `Toggle=` itself. Without one, flip the
-					// entry directly.
-					let directory = item.path.is_dir();
-					let entry_path = if directory {
-						item.path.join(".directory")
-					} else {
-						item.path.clone()
-					};
-					let kind = if directory {
-						crate::item::FsKind::Directory
-					} else {
-						crate::item::FsKind::File
-					};
-					let has_exec =
-						crate::entry::Entry::read(&entry_path, kind).is_some_and(|entry| {
-							entry
-								.exec
-								.as_deref()
-								.is_some_and(|exec| !exec.trim().is_empty())
-						});
-					if has_exec {
-						self.dispatch(Command::Launch(LaunchRequest::Control {
-							path: item.path.clone(),
-							values: Vec::new(),
-						}))
-					} else {
-						self.dispatch(Command::Run(crate::ops::Op::Toggle {
-							path: item.path.clone(),
-						}))
-					}
-				}
+				Some(item) => self.toggle_item(&item),
 				None => Ok(Outcome::default()),
 			},
 			ActionId::QUIT_ACTIVE => match first {
@@ -984,6 +923,7 @@ impl Engine {
 				| crate::item::ItemKind::Button
 				| crate::item::ItemKind::Toggle
 				| crate::item::ItemKind::Number
+				| crate::item::ItemKind::Text
 				| crate::item::ItemKind::Radio
 		) {
 			return true;
@@ -1004,16 +944,30 @@ impl Engine {
 		if item.is_busy() {
 			return Ok(Outcome::default());
 		}
+		// A choice in a `[Radio]` folder is selected, not launched: the
+		// folder owns the stored value and its `[Radio] Exec`. `clam-configd`
+		// writes its choices as `Type=Button`.
+		if self.is_radio_member(&item.path) {
+			return self.select_radio(item);
+		}
 		match item.kind {
-			crate::item::ItemKind::Application
-			| crate::item::ItemKind::Button
-			| crate::item::ItemKind::Toggle
-			| crate::item::ItemKind::Number
-			| crate::item::ItemKind::Radio => {
+			crate::item::ItemKind::Button | crate::item::ItemKind::Application => {
 				return self.dispatch(Command::Launch(LaunchRequest::Item {
 					path: item.path.clone(),
 				}));
 			}
+			crate::item::ItemKind::Toggle => return self.toggle_item(item),
+			crate::item::ItemKind::Number => {
+				return Ok(outcome(vec![Effect::Prompt(Prompt::Number {
+					path: item.path.clone(),
+				})]));
+			}
+			crate::item::ItemKind::Text => {
+				return Ok(outcome(vec![Effect::Prompt(Prompt::Text {
+					path: item.path.clone(),
+				})]));
+			}
+			crate::item::ItemKind::Radio => return self.select_radio(item),
 			crate::item::ItemKind::Link => {
 				if let Some(target) = &item.target {
 					let request = NavigationRequest {
@@ -1046,6 +1000,105 @@ impl Engine {
 		Ok(outcome(vec![Effect::Frontend(FrontendRequest::OpenPath(
 			item.path.clone(),
 		))]))
+	}
+
+	/// Flip a `Type=Toggle` item. A provider-owned toggle runs its `Exec` with
+	/// the target state; without one, the entry flips its own `Toggle=`.
+	fn toggle_item(&mut self, item: &Item) -> Result<Outcome, Error> {
+		let directory = item.path.is_dir();
+		let entry_path = if directory {
+			item.path.join(".directory")
+		} else {
+			item.path.clone()
+		};
+		let kind = if directory {
+			crate::item::FsKind::Directory
+		} else {
+			crate::item::FsKind::File
+		};
+		let has_exec = crate::entry::Entry::read(&entry_path, kind).is_some_and(|entry| {
+			entry
+				.exec
+				.as_deref()
+				.is_some_and(|exec| !exec.trim().is_empty())
+		});
+		if has_exec {
+			self.dispatch(Command::Launch(LaunchRequest::Control {
+				path: item.path.clone(),
+				values: Vec::new(),
+			}))
+		} else {
+			self.dispatch(Command::Run(crate::ops::Op::Toggle {
+				path: item.path.clone(),
+			}))
+		}
+	}
+
+	/// Select a member of the folder's `[Radio]` group.
+	fn select_radio(&mut self, item: &Item) -> Result<Outcome, Error> {
+		if !self.is_radio_member(&item.path) {
+			return Ok(Outcome::default());
+		}
+		let value = crate::folder::radio_value(&item.path);
+		if value.is_empty() {
+			return Ok(Outcome::default());
+		}
+		let delta = self
+			.config
+			.set_raw(&self.location, "Radio", "Selected", &value, true)?;
+		let folder = self.apply_config_change(delta.scope);
+		self.revision += 1;
+		let exec = self.config.radio_exec.clone();
+		let mut outcome = Outcome {
+			changes: ChangeSet {
+				config: vec![delta],
+				folder,
+				..ChangeSet::default()
+			},
+			..Outcome::default()
+		};
+		if !exec.trim().is_empty() {
+			let launch = self.dispatch(Command::Launch(LaunchRequest::Radio {
+				exec,
+				value,
+				name: item.title.clone(),
+				path: item.path.clone(),
+			}))?;
+			outcome.effects.extend(launch.effects);
+		}
+		// The stored choice changes the mark on every row; editing the
+		// `.directory` does not touch the folder's mtime, so ask the
+		// frontend to rebuild the view.
+		outcome
+			.effects
+			.push(Effect::Reload(vec![self.folder_path().to_path_buf()]));
+		Ok(outcome)
+	}
+
+	/// How the frontend should draw this item as a control.
+	pub fn control_state(&self, item: &Item) -> crate::item::ControlState {
+		use crate::item::{ControlState, ItemKind};
+		// A `[Radio]` folder makes every direct child a choice, whatever its
+		// entry type; `clam-configd` writes its zones as `Type=Button`.
+		if self.is_radio_member(&item.path) {
+			return ControlState::Radio {
+				selected: !self.config.radio_selected.is_empty()
+					&& crate::folder::radio_value(&item.path) == self.config.radio_selected,
+			};
+		}
+		match item.kind {
+			ItemKind::Toggle => ControlState::Toggle { on: item.toggle_on },
+			ItemKind::Number => ControlState::Number {
+				value: item.number_value.clone(),
+			},
+			ItemKind::Text => ControlState::Text {
+				value: item.text_value.clone(),
+				placeholder: item.text_placeholder.clone(),
+			},
+			ItemKind::Radio => ControlState::Radio { selected: false },
+			ItemKind::Button => ControlState::Button,
+			_ => ControlState::None,
+		}
 	}
 
 	fn progress_action(&mut self, item: &Item, action: ProgressAction) -> Result<Outcome, Error> {
@@ -1459,6 +1512,7 @@ fn item_subjects(item: &Item) -> ActionSubjects {
 		ItemKind::Button => ActionSubjects::BUTTON,
 		ItemKind::Toggle => ActionSubjects::TOGGLE,
 		ItemKind::Number => ActionSubjects::NUMBER,
+		ItemKind::Text => ActionSubjects::TEXT,
 		ItemKind::Radio => ActionSubjects::RADIO,
 	});
 	if let Some(mime) = item.mime.as_deref() {
@@ -2456,6 +2510,104 @@ mod tests {
 		// The provider owns the stored state.
 		let text = std::fs::read_to_string(&toggle).unwrap();
 		assert!(text.contains("Toggle=false"));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn open_routes_controls_to_their_editors() {
+		let path = temp_folder("open-controls");
+		let number = path.join("clock.desktop");
+		std::fs::write(
+			&number,
+			"[Desktop Entry]\nType=Number\nName=Clock\nNumberCount=2\n\
+			 Number1Label=Hour\nNumber1Value=9\nNumber1Min=0\nNumber1Max=23\n\
+			 Number2Label=Minute\nNumber2Value=30\nNumber2Min=0\nNumber2Max=59\n",
+		)
+		.unwrap();
+		let text = path.join("name.desktop");
+		std::fs::write(
+			&text,
+			"[Desktop Entry]\nType=Text\nName=User name\nText=Ada\n",
+		)
+		.unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: number.clone(),
+			}))
+			.unwrap();
+		let outcome = engine.dispatch(Command::Invoke(ActionId::OPEN)).unwrap();
+		assert!(matches!(
+			outcome.effects.first(),
+			Some(Effect::Prompt(Prompt::Number { path })) if path == &number
+		));
+		assert_eq!(
+			engine.control_state(engine.item_at(&number).unwrap()),
+			crate::item::ControlState::Number {
+				value: String::from("9 30")
+			}
+		);
+
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: text.clone(),
+			}))
+			.unwrap();
+		let outcome = engine.dispatch(Command::Invoke(ActionId::OPEN)).unwrap();
+		assert!(matches!(
+			outcome.effects.first(),
+			Some(Effect::Prompt(Prompt::Text { path })) if path == &text
+		));
+		assert_eq!(
+			engine.control_state(engine.item_at(&text).unwrap()),
+			crate::item::ControlState::Text {
+				value: String::from("Ada"),
+				placeholder: String::new(),
+			}
+		);
+
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn opening_a_button_in_a_radio_folder_selects_it() {
+		let path = temp_folder("radio-button");
+		std::fs::write(
+			path.join(".directory"),
+			"[Radio]\nEnabled = true\nOnly = Files\nSelected =\nExec = /bin/true %v\n",
+		)
+		.unwrap();
+		let choice = path.join("one.desktop");
+		std::fs::write(
+			&choice,
+			"[Desktop Entry]\nType=Button\nName=One\nExec=/bin/true\n",
+		)
+		.unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: choice.clone(),
+			}))
+			.unwrap();
+		let item = engine.item_at(&choice).unwrap().clone();
+		assert_eq!(
+			engine.control_state(&item),
+			crate::item::ControlState::Radio { selected: false }
+		);
+
+		let outcome = engine.dispatch(Command::Invoke(ActionId::OPEN)).unwrap();
+		assert_eq!(engine.config().radio_selected, "one");
+		assert!(matches!(outcome.effects.first(), Some(Effect::Launch(_))));
+		assert!(
+			outcome
+				.effects
+				.iter()
+				.any(|effect| matches!(effect, Effect::Reload(_)))
+		);
 		std::fs::remove_dir_all(path).unwrap();
 	}
 

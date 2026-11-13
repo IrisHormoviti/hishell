@@ -95,6 +95,10 @@ pub enum Op {
 		path: PathBuf,
 		values: Vec<i64>,
 	},
+	Text {
+		path: PathBuf,
+		value: String,
+	},
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -113,6 +117,7 @@ pub enum OpKind {
 	RotateImage,
 	Toggle,
 	Number,
+	Text,
 	Launch,
 }
 
@@ -133,6 +138,7 @@ impl Op {
 			Self::RotateImage { .. } => OpKind::RotateImage,
 			Self::Toggle { .. } => OpKind::Toggle,
 			Self::Number { .. } => OpKind::Number,
+			Self::Text { .. } => OpKind::Text,
 		}
 	}
 }
@@ -154,6 +160,7 @@ impl OpKind {
 			Self::RotateImage => "rotate-image",
 			Self::Toggle => "toggle",
 			Self::Number => "number",
+			Self::Text => "text",
 			Self::Launch => "launch",
 		}
 	}
@@ -389,6 +396,10 @@ pub fn run_with(
 			Err(error) => fail(&mut outcome, path, error),
 		},
 		Op::Number { path, values } => match set_numbers(path, values) {
+			Ok(()) => outcome.succeeded.push(path.clone()),
+			Err(error) => fail(&mut outcome, path, error),
+		},
+		Op::Text { path, value } => match set_text(path, value) {
 			Ok(()) => outcome.succeeded.push(path.clone()),
 			Err(error) => fail(&mut outcome, path, error),
 		},
@@ -902,6 +913,14 @@ fn set_numbers(path: &Path, values: &[i64]) -> Result<(), OpError> {
 			&value.to_string(),
 		);
 	}
+	Ok(())
+}
+
+fn set_text(path: &Path, value: &str) -> Result<(), OpError> {
+	if crate::entry::Entry::read(path, crate::item::FsKind::File).is_none() {
+		return Err(OpError::Unsupported(String::from("not an entry")));
+	}
+	crate::config_parser::ConfigParser::set_value(path, "Desktop Entry", "Text", value);
 	Ok(())
 }
 

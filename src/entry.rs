@@ -17,6 +17,7 @@ pub enum EntryType {
 	Button,
 	Toggle,
 	Number,
+	Text,
 	Radio,
 	File,
 }
@@ -30,6 +31,7 @@ impl EntryType {
 			Self::Button => "Button",
 			Self::Toggle => "Toggle",
 			Self::Number => "Number",
+			Self::Text => "Text",
 			Self::Radio => "Radio",
 			Self::File => "File",
 		}
@@ -43,6 +45,7 @@ impl EntryType {
 			"button" => Some(Self::Button),
 			"toggle" => Some(Self::Toggle),
 			"number" => Some(Self::Number),
+			"text" => Some(Self::Text),
 			"radio" => Some(Self::Radio),
 			"file" => Some(Self::File),
 			_ => None,
@@ -57,6 +60,7 @@ impl EntryType {
 			Self::Button => ItemKind::Button,
 			Self::Toggle => ItemKind::Toggle,
 			Self::Number => ItemKind::Number,
+			Self::Text => ItemKind::Text,
 			Self::Radio => ItemKind::Radio,
 			Self::File => ItemKind::File,
 		}
@@ -98,6 +102,10 @@ pub struct Entry {
 	pub toggle: bool,
 	pub number_value: String,
 	pub number_fields: Vec<NumberField>,
+	/// The current value of a `Type=Text` field.
+	pub text_value: String,
+	/// Placeholder shown for an empty `Type=Text` field.
+	pub text_placeholder: Option<String>,
 	/// Written by a provider daemon rather than the user.
 	pub generated: bool,
 	/// Provider actions for a generated entry or section.
@@ -204,6 +212,8 @@ impl Entry {
 			toggle: value_bool(values.get("Toggle")),
 			number_value: number_value(values),
 			number_fields: number_fields(values),
+			text_value: string("Text").unwrap_or_default(),
+			text_placeholder: string("TextPlaceholder").filter(|value| !value.is_empty()),
 			generated: value_bool(values.get("Generated")),
 			destroy: string("Destroy").filter(|command| !command.trim().is_empty()),
 			reset: string("Reset").filter(|command| !command.trim().is_empty()),
@@ -245,6 +255,17 @@ impl Entry {
 			expanded
 		};
 		self.exec_args_from(&expanded, None)
+	}
+
+	/// The provider command for a `Type=Text` control. `%v` is replaced by
+	/// the entered text.
+	pub fn text_args(&self, value: &str) -> Result<Vec<String>, String> {
+		let exec = self
+			.exec
+			.as_deref()
+			.filter(|exec| !exec.trim().is_empty())
+			.ok_or_else(|| String::from("entry has no Exec"))?;
+		self.hook_args(exec, Some(value))
 	}
 
 	fn exec_args_from(&self, exec: &str, file: Option<&Path>) -> Result<Vec<String>, String> {
@@ -711,6 +732,27 @@ mod tests {
 		assert_eq!(entry.number_fields[0].max, 10);
 		assert_eq!(entry.number_fields[1].label, "Right");
 		assert_eq!(entry.number_fields[1].value, 7);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn reads_text_control_fields() {
+		let root = window("text");
+		let path = root.join("name.desktop");
+		std::fs::write(
+			&path,
+			"[Desktop Entry]\nType=Text\nName=User name\nText=Ada Lovelace\n\
+			 TextPlaceholder=Your name\nExec=provider set-name %v\n",
+		)
+		.unwrap();
+		let entry = Entry::read(&path, FsKind::File).unwrap();
+		assert_eq!(entry.entry_type, Some(EntryType::Text));
+		assert_eq!(entry.text_value, "Ada Lovelace");
+		assert_eq!(entry.text_placeholder.as_deref(), Some("Your name"));
+		assert_eq!(
+			entry.text_args("Grace Hopper").unwrap(),
+			vec!["provider", "set-name", "Grace Hopper"]
+		);
 		std::fs::remove_dir_all(root).unwrap();
 	}
 

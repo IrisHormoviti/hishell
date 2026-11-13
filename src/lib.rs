@@ -61,7 +61,7 @@ pub use execution::{
 pub use focus::{Direction, Focus, FocusCommand};
 pub use folder::ScanOptions;
 pub use history::{History, HistoryCommand, HistoryEntry, HistoryStatus};
-pub use item::{FsKind, IconRef, Item, ItemId, ItemKind};
+pub use item::{ControlState, FsKind, IconRef, Item, ItemId, ItemKind};
 pub use jobs::{CancelToken, JobEvent, JobHandle, JobId, Jobs};
 pub use location::{File, Folder, Location, LocationKind};
 pub use navigation::{

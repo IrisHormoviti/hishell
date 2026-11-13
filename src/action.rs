@@ -104,7 +104,8 @@ impl ActionSubjects {
 	pub const TOGGLE: Self = Self(1 << 9);
 	pub const NUMBER: Self = Self(1 << 10);
 	pub const RADIO: Self = Self(1 << 11);
-	pub const PROGRESS: Self = Self(1 << 12);
+	pub const TEXT: Self = Self(1 << 12);
+	pub const PROGRESS: Self = Self(1 << 13);
 	pub const ITEMS: Self = Self(
 		Self::FOLDER.0
 			| Self::FILE.0
@@ -116,6 +117,7 @@ impl ActionSubjects {
 			| Self::BUTTON.0
 			| Self::TOGGLE.0
 			| Self::NUMBER.0
+			| Self::TEXT.0
 			| Self::RADIO.0,
 	);
 

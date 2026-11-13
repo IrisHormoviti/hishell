@@ -803,6 +803,8 @@ mod tests {
 			toggle: false,
 			number_value: String::new(),
 			number_fields: Vec::new(),
+			text_value: String::new(),
+			text_placeholder: None,
 			generated: false,
 			destroy: None,
 			reset: None,

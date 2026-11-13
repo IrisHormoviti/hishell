@@ -46,6 +46,7 @@ pub enum ItemKind {
 	Button,
 	Toggle,
 	Number,
+	Text,
 	Radio,
 }
 
@@ -56,6 +57,17 @@ impl ItemKind {
 			FsKind::File => Self::File,
 		}
 	}
+}
+
+/// How a control entry presents itself and what the frontend has to draw.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ControlState {
+	None,
+	Toggle { on: bool },
+	Number { value: String },
+	Text { value: String, placeholder: String },
+	Radio { selected: bool },
+	Button,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -86,6 +98,9 @@ pub struct Item {
 	pub is_dotfile: bool,
 	pub toggle_on: bool,
 	pub number_value: String,
+	pub number_fields: Vec<crate::entry::NumberField>,
+	pub text_value: String,
+	pub text_placeholder: String,
 	pub size: u64,
 	pub modified: u64,
 	pub created: u64,
