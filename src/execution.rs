@@ -12,7 +12,6 @@ use crate::item::FsKind;
 
 pub const ITEM_ENV: &str = "HISHELL_APP_ITEM";
 pub const NAME_ENV: &str = "HISHELL_APP_NAME";
-pub const SCREEN_ENV: &str = "HISHELL_SCREEN";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionWrapper {
@@ -115,10 +114,12 @@ pub struct SpawnRequest {
 	/// text and radio commands change a setting; they are not launches, so they
 	/// must not wash the screens or hold the shell down.
 	pub announce: bool,
-	pub screen: Option<String>,
 	/// `[App Display] MainDisplay`; becomes the compositor's panel hint.
 	pub main_display: Option<i32>,
 	pub through_wrapper: bool,
+	/// The item's own `[Execution] ExecutionWrapper`, when it sets one. It
+	/// replaces the engine's wrapper for this launch.
+	pub wrapper_override: Option<String>,
 	/// Whether this launch represents a running application, rather than a
 	/// short-lived provider command.
 	pub track_active: bool,
@@ -265,7 +266,6 @@ struct ActiveLaunch {
 
 pub struct Execution {
 	wrapper: Option<ExecutionWrapper>,
-	screen: Option<String>,
 	pending: HashMap<LaunchId, SpawnRequest>,
 	active: HashMap<PathBuf, ActiveLaunch>,
 	spawner: Arc<dyn Spawner>,
@@ -277,13 +277,11 @@ pub struct Execution {
 impl Execution {
 	pub fn new(
 		wrapper: Option<ExecutionWrapper>,
-		screen: Option<String>,
 		spawner: Arc<dyn Spawner>,
 		clock: Arc<dyn Clock>,
 	) -> Self {
 		Self {
 			wrapper,
-			screen,
 			pending: HashMap::new(),
 			active: HashMap::new(),
 			spawner,
@@ -293,25 +291,12 @@ impl Execution {
 		}
 	}
 
-	pub fn free_desktop(wrapper: Option<ExecutionWrapper>, screen: Option<String>) -> Self {
-		Self::new(
-			wrapper,
-			screen,
-			Arc::new(FreeDesktopSpawner),
-			Arc::new(SystemClock),
-		)
+	pub fn free_desktop(wrapper: Option<ExecutionWrapper>) -> Self {
+		Self::new(wrapper, Arc::new(FreeDesktopSpawner), Arc::new(SystemClock))
 	}
 
 	pub fn set_wrapper(&mut self, wrapper: Option<ExecutionWrapper>) {
 		self.wrapper = wrapper;
-	}
-
-	pub fn set_screen(&mut self, screen: Option<String>) {
-		self.screen = screen;
-	}
-
-	pub fn screen(&self) -> Option<&str> {
-		self.screen.as_deref()
 	}
 
 	pub fn request(&mut self, request: LaunchRequest) -> Result<LaunchOutcome, LaunchError> {
@@ -319,17 +304,11 @@ impl Execution {
 		self.request_spawn(request)
 	}
 
-	/// Ask to start an already-resolved program. The wrapper, preflight,
-	/// screen, and launch marker are the same as for an entry launch, so a
-	/// frontend with its own command line does not reimplement them.
-	pub fn request_spawn(
-		&mut self,
-		mut request: SpawnRequest,
-	) -> Result<LaunchOutcome, LaunchError> {
-		if request.screen.is_none() {
-			request.screen = self.screen.clone();
-		}
-		let wrapper = self.usable_wrapper();
+	/// Ask to start an already-resolved program. The wrapper, preflight, and
+	/// launch marker are the same as for an entry launch, so a frontend with
+	/// its own command line does not reimplement them.
+	pub fn request_spawn(&mut self, request: SpawnRequest) -> Result<LaunchOutcome, LaunchError> {
+		let wrapper = self.wrapper_for(&request);
 		if request.through_wrapper
 			&& let Some(wrapper) = wrapper.as_deref()
 			&& let Some(message) = self.spawner.preflight(wrapper, &request)
@@ -351,7 +330,7 @@ impl Execution {
 		let Some(request) = self.pending.remove(&id) else {
 			return Err(LaunchError::NotFound(PathBuf::from("pending launch")));
 		};
-		let wrapper = self.usable_wrapper();
+		let wrapper = self.wrapper_for(&request);
 		self.start(request, wrapper.as_deref())
 	}
 
@@ -480,9 +459,9 @@ impl Execution {
 					cwd: path.parent().map(Path::to_path_buf),
 					animation: String::new(),
 					announce: false,
-					screen: self.screen.clone(),
 					main_display: None,
 					through_wrapper: false,
+					wrapper_override: None,
 					track_active: false,
 				})
 			}
@@ -592,9 +571,9 @@ impl Execution {
 			cwd: entry.path.parent().map(Path::to_path_buf),
 			animation,
 			announce: true,
-			screen: self.screen.clone(),
 			main_display: entry.main_display,
 			through_wrapper,
+			wrapper_override: entry_execution_wrapper(&entry.path),
 			track_active: true,
 		})
 	}
@@ -624,11 +603,11 @@ impl Execution {
 			cwd: entry.path.parent().map(Path::to_path_buf),
 			animation: String::new(),
 			announce: false,
-			screen: self.screen.clone(),
 			main_display: entry.main_display,
 			// Controls talk to their provider directly; the execution wrapper
 			// is for launching applications.
 			through_wrapper: false,
+			wrapper_override: None,
 			track_active: false,
 		})
 	}
@@ -658,9 +637,9 @@ impl Execution {
 			cwd: entry.path.parent().map(Path::to_path_buf),
 			animation: String::new(),
 			announce: false,
-			screen: self.screen.clone(),
 			main_display: entry.main_display,
 			through_wrapper: false,
+			wrapper_override: None,
 			track_active: false,
 		})
 	}
@@ -669,6 +648,21 @@ impl Execution {
 		let wrapper = self.wrapper.as_ref()?;
 		let command = wrapper.command.trim();
 		(!command.is_empty() && self.spawner.command_exists(command)).then(|| command.to_string())
+	}
+
+	/// The wrapper for one launch: the item's own `[Execution] ExecutionWrapper`
+	/// when it sets a usable one, otherwise the engine's.
+	fn wrapper_for(&self, request: &SpawnRequest) -> Option<String> {
+		if let Some(wrapper) = request
+			.wrapper_override
+			.as_deref()
+			.map(str::trim)
+			.filter(|wrapper| !wrapper.is_empty())
+			&& self.spawner.command_exists(wrapper)
+		{
+			return Some(wrapper.to_string());
+		}
+		self.usable_wrapper()
 	}
 
 	fn start(&mut self, request: SpawnRequest, wrapper: Option<&str>) -> Result<(), LaunchError> {
@@ -771,19 +765,32 @@ fn split_command(command: &str) -> (Option<String>, Vec<String>) {
 	(program, parts.collect())
 }
 
+/// The `[Execution] ExecutionWrapper` an item sets for its own launch.
+///
+/// It is read from the item's own entry — a folder's `.directory`, a file, or
+/// an application's `.desktop` — so an application can override the wrapper
+/// without touching the session-wide configuration. System and user config are
+/// not consulted here; the engine's own wrapper is the fallback.
+fn entry_execution_wrapper(entry_path: &Path) -> Option<String> {
+	if entry_path.as_os_str().is_empty() {
+		return None;
+	}
+	let text = std::fs::read_to_string(entry_path).ok()?;
+	let (sections, _) = ConfigParser::parse_str(&text, &entry_path.to_string_lossy());
+	let value = sections.get("Execution")?.get("ExecutionWrapper")?;
+	let wrapper = match value {
+		ConfigValue::String(value) => value.clone(),
+		other => other.to_json_string(),
+	};
+	(!wrapper.trim().is_empty()).then_some(wrapper)
+}
+
 fn apply_environment(command: &mut Command, request: &SpawnRequest) {
 	if !request.item.as_os_str().is_empty() {
 		command.env(ITEM_ENV, &request.item);
 	}
 	if !request.name.is_empty() {
 		command.env(NAME_ENV, &request.name);
-	}
-	if let Some(screen) = request
-		.screen
-		.as_deref()
-		.filter(|screen| !screen.is_empty())
-	{
-		command.env(SCREEN_ENV, screen);
 	}
 	if let Some(display) = request.main_display.filter(|display| *display >= 0) {
 		// The compositor's per-client panel hint. A single index keeps every
@@ -890,7 +897,7 @@ mod tests {
 		let root = tree("plain");
 		let entry = app_entry(&root);
 		let spawner = Arc::new(FakeSpawner::default());
-		let mut execution = Execution::new(None, None, spawner.clone(), Arc::new(SystemClock));
+		let mut execution = Execution::new(None, spawner.clone(), Arc::new(SystemClock));
 		let outcome = execution
 			.request(LaunchRequest::Item { path: entry })
 			.unwrap();
@@ -923,7 +930,6 @@ mod tests {
 			Some(ExecutionWrapper {
 				command: String::from("wrapper"),
 			}),
-			None,
 			spawner.clone(),
 			Arc::new(SystemClock),
 		);
@@ -954,7 +960,7 @@ mod tests {
 		let choice = root.join("one");
 		std::fs::create_dir_all(&choice).unwrap();
 		let spawner = Arc::new(FakeSpawner::default());
-		let mut execution = Execution::new(None, None, spawner.clone(), Arc::new(SystemClock));
+		let mut execution = Execution::new(None, spawner.clone(), Arc::new(SystemClock));
 		let outcome = execution
 			.request(LaunchRequest::Radio {
 				exec: String::from("provider %v %n %p"),
@@ -989,7 +995,7 @@ mod tests {
 		)
 		.unwrap();
 		let spawner = Arc::new(FakeSpawner::default());
-		let mut execution = Execution::new(None, None, spawner.clone(), Arc::new(SystemClock));
+		let mut execution = Execution::new(None, spawner.clone(), Arc::new(SystemClock));
 		let outcome = execution
 			.request(LaunchRequest::Text {
 				path: entry,
@@ -1016,7 +1022,6 @@ mod tests {
 			Some(ExecutionWrapper {
 				command: String::from("wrapper"),
 			}),
-			None,
 			spawner.clone(),
 			Arc::new(SystemClock),
 		);
@@ -1066,9 +1071,9 @@ mod tests {
 				cwd: None,
 				animation: String::new(),
 				announce: false,
-				screen: None,
 				main_display: Some(0),
 				through_wrapper: false,
+				wrapper_override: None,
 				track_active: false,
 			},
 		);
@@ -1078,6 +1083,60 @@ mod tests {
 			.and_then(|(_, value)| value)
 			.map(|value| value.to_string_lossy().into_owned());
 		assert_eq!(value.as_deref(), Some("0"));
+	}
+
+	#[test]
+	fn an_entry_overrides_the_execution_wrapper() {
+		let root = tree("entry-wrapper");
+		let entry = root.join("viewer.desktop");
+		std::fs::write(
+			&entry,
+			"[Desktop Entry]\nType=Application\nName=Viewer\nExec=viewer %f\n\n\
+			 [Execution]\nExecutionWrapper=clam-applet\n",
+		)
+		.unwrap();
+		let spawner = Arc::new(FakeSpawner {
+			exists: true,
+			..FakeSpawner::default()
+		});
+		let mut execution = Execution::new(
+			Some(ExecutionWrapper {
+				command: String::from("clam-guest"),
+			}),
+			spawner.clone(),
+			Arc::new(SystemClock),
+		);
+		let outcome = execution
+			.request(LaunchRequest::Item { path: entry })
+			.unwrap();
+		assert_eq!(outcome, LaunchOutcome::Started);
+		let spawned = spawner.spawned.lock().unwrap();
+		assert_eq!(spawned.len(), 1);
+		assert_eq!(spawned[0].0.as_deref(), Some("clam-applet"));
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn an_entry_without_a_wrapper_uses_the_engine_one() {
+		let root = tree("entry-no-wrapper");
+		let entry = app_entry(&root);
+		let spawner = Arc::new(FakeSpawner {
+			exists: true,
+			..FakeSpawner::default()
+		});
+		let mut execution = Execution::new(
+			Some(ExecutionWrapper {
+				command: String::from("clam-guest"),
+			}),
+			spawner.clone(),
+			Arc::new(SystemClock),
+		);
+		execution
+			.request(LaunchRequest::Item { path: entry })
+			.unwrap();
+		let spawned = spawner.spawned.lock().unwrap();
+		assert_eq!(spawned[0].0.as_deref(), Some("clam-guest"));
+		std::fs::remove_dir_all(root).unwrap();
 	}
 
 	#[test]
@@ -1093,7 +1152,6 @@ mod tests {
 			Some(ExecutionWrapper {
 				command: String::from("wrapper"),
 			}),
-			None,
 			spawner.clone(),
 			Arc::new(SystemClock),
 		);

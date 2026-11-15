@@ -45,7 +45,6 @@ pub enum Mode {
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeSettings {
 	pub execution_wrapper: Option<String>,
-	pub screen: Option<String>,
 	pub default_layout: Vec<String>,
 }
 
@@ -222,11 +221,6 @@ impl Engine {
 			.clone()
 			.filter(|command| !command.trim().is_empty())
 			.map(|command| ExecutionWrapper { command });
-		let screen = options
-			.runtime
-			.screen
-			.clone()
-			.filter(|screen| !screen.trim().is_empty());
 		let mut engine = Self {
 			mode: options.mode,
 			location,
@@ -240,7 +234,7 @@ impl Engine {
 			jobs: Jobs::default(),
 			running_jobs: HashMap::new(),
 			progress_jobs: HashMap::new(),
-			execution: Execution::new(wrapper, screen, spawner, Arc::new(SystemClock)),
+			execution: Execution::new(wrapper, spawner, Arc::new(SystemClock)),
 			platform: options.deps.platform,
 			history: History::default(),
 			focus: Focus::default(),
@@ -1400,9 +1394,6 @@ impl Engine {
 				command: self.config.execution_wrapper.clone(),
 			});
 		self.execution.set_wrapper(wrapper);
-		self.execution.set_screen(
-			(!self.config.screen.trim().is_empty()).then(|| self.config.screen.clone()),
-		);
 	}
 
 	fn apply_config_change(&mut self, scope: ChangeScope) -> FolderDelta {
@@ -1519,11 +1510,6 @@ impl Engine {
 		{
 			self.config.execution_wrapper = wrapper.clone();
 		}
-		if self.config.screen.is_empty()
-			&& let Some(screen) = &self.runtime.screen
-		{
-			self.config.screen = screen.clone();
-		}
 	}
 }
 
@@ -1576,7 +1562,6 @@ fn raw_config(runtime: &RuntimeSettings) -> Config {
 	Config {
 		middle_layout,
 		execution_wrapper: runtime.execution_wrapper.clone().unwrap_or_default(),
-		screen: runtime.screen.clone().unwrap_or_default(),
 		..Config::default()
 	}
 }

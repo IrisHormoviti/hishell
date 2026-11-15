@@ -121,8 +121,7 @@ config_keys! {
 	NativeTitleBar => "Layout", "NativeTitleBar", Both, All, ConfigValue::Bool(true);
 	NativeDrag => "Layout", "NativeDrag", Both, All, ConfigValue::Bool(false);
 	ShowShortcuts => "Layout", "ShowShortcuts", Both, All, ConfigValue::Bool(true);
-	ExecutionWrapper => "Layout", "ExecutionWrapper", Both, All, ConfigValue::Str(String::new());
-	Screen => "Layout", "Screen", Both, All, ConfigValue::Str(String::new());
+	ExecutionWrapper => "Execution", "ExecutionWrapper", Both, All, ConfigValue::Str(String::new());
 
 	NavigationType => "Folder Navigation", "NavigationType", Folder, View, ConfigValue::Str(String::from("IN_PLACE"));
 	CenterFocus => "Folder Navigation", "CenterFocus", Folder, View, ConfigValue::Bool(true);
@@ -268,7 +267,6 @@ pub struct Config {
 	pub native_drag: bool,
 	pub show_shortcuts: bool,
 	pub execution_wrapper: String,
-	pub screen: String,
 
 	pub navigation_type: NavigationType,
 	pub center_focus: bool,
@@ -323,7 +321,6 @@ impl Config {
 			native_drag: false,
 			show_shortcuts: true,
 			execution_wrapper: String::new(),
-			screen: String::new(),
 			navigation_type: NavigationType::InPlace,
 			center_focus: false,
 			smooth_scrolling: false,
@@ -407,7 +404,6 @@ impl Config {
 			ConfigKey::NativeDrag => ConfigValue::Bool(self.native_drag),
 			ConfigKey::ShowShortcuts => ConfigValue::Bool(self.show_shortcuts),
 			ConfigKey::ExecutionWrapper => ConfigValue::Str(self.execution_wrapper.clone()),
-			ConfigKey::Screen => ConfigValue::Str(self.screen.clone()),
 			ConfigKey::NavigationType => ConfigValue::Str(self.navigation_type.as_key().into()),
 			ConfigKey::CenterFocus => ConfigValue::Bool(self.center_focus),
 			ConfigKey::SmoothScrolling => ConfigValue::Bool(self.smooth_scrolling),
@@ -482,7 +478,6 @@ impl Config {
 			ConfigKey::NativeDrag => self.native_drag = boolean(key, value)?,
 			ConfigKey::ShowShortcuts => self.show_shortcuts = boolean(key, value)?,
 			ConfigKey::ExecutionWrapper => self.execution_wrapper = string(key, value)?,
-			ConfigKey::Screen => self.screen = string(key, value)?,
 			ConfigKey::NavigationType => {
 				self.navigation_type = parse(key, value, NavigationType::from_key)?
 			}
