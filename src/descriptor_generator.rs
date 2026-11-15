@@ -74,7 +74,7 @@ const RESULT_TTL: Duration = Duration::from_secs(120);
 /// Bump when a generator's output changes in a way the source fingerprint
 /// cannot see (a new descriptor group, a different icon). Old stamps have no
 /// version and are regenerated once.
-const CACHE_VERSION: u32 = 3;
+const CACHE_VERSION: u32 = 4;
 
 #[derive(Clone, Debug)]
 struct Generator {
@@ -639,6 +639,14 @@ pub fn handles(src: &Path) -> bool {
 	generator_for(&mime_for(src)).is_some()
 }
 
+/// Whether a generator owns `mime`, when the caller already knows the content
+/// type. The folder scan uses this to skip the cache lookups — each a
+/// `realpath` plus several stats — for the types no generator handles, which
+/// is most of a settings folder.
+pub fn handles_mime(mime: &str) -> bool {
+	generator_for(mime).is_some()
+}
+
 /// The themed icon a generator declares for this file's content type.
 ///
 /// The file view asks for this after a generated descriptor and before the
@@ -653,17 +661,27 @@ pub fn placeholder_icon(src: &Path) -> Option<String> {
 	generator_for(&mime_for(src)).and_then(|generator| generator.icon)
 }
 
+/// The generator's placeholder icon for a content type the caller already
+/// knows, so a folder scan does not stat every file to ask.
+pub fn placeholder_icon_mime(mime: &str) -> Option<String> {
+	generator_for(mime).and_then(|generator| generator.icon)
+}
+
 /// Ask for a descriptor for `src`. A valid cached entry is used directly; when
 /// one is missing or stale the job is queued. Called for every file in a folder
 /// scan, so it must stay cheap when everything is already cached.
 pub fn request(src: &Path, folder: &Path) {
-	if !src.is_file() || cached(src).is_some() {
-		return;
-	}
+	// The generator lookup is a cached table read, while the checks below are
+	// FUSE round-trips. Decide whether this file needs one before touching it,
+	// so a folder of plain entries (`.desktop`, ROMs without a generator) does
+	// not pay for two stats each.
 	let mime = mime_for(src);
 	let Some(generator) = generator_for(&mime) else {
 		return;
 	};
+	if !src.is_file() || cached(src).is_some() {
+		return;
+	}
 
 	let key = cache_path(src);
 	let st = state();

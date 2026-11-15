@@ -145,7 +145,7 @@ impl Folder {
 				&& crate::appimage::is_appimage(&raw.path))
 			.then(|| crate::appimage::entry(&raw.path))
 			.flatten();
-			if options.read_entries && raw.fs_kind == FsKind::File && raw.path.is_file() {
+			if options.read_entries && raw.fs_kind == FsKind::File {
 				crate::descriptor_generator::request(&raw.path, path);
 			}
 			let generated = (raw.fs_kind == FsKind::File)
@@ -172,7 +172,11 @@ impl Folder {
 				})
 				.or_else(|| {
 					(raw.fs_kind == FsKind::File)
-						.then(|| crate::descriptor_generator::placeholder_icon(&raw.path))
+						.then(|| {
+							crate::descriptor_generator::placeholder_icon_mime(
+								mime.as_deref().unwrap_or_default(),
+							)
+						})
 						.flatten()
 						.map(IconRef::Theme)
 				})
@@ -193,9 +197,12 @@ impl Folder {
 					})
 				})
 				.or_else(|| {
-					(raw.fs_kind == FsKind::File)
-						.then(|| crate::descriptor_generator::cached_icon_art(&raw.path))
-						.flatten()
+					(raw.fs_kind == FsKind::File
+						&& crate::descriptor_generator::handles_mime(
+							mime.as_deref().unwrap_or_default(),
+						))
+					.then(|| crate::descriptor_generator::cached_icon_art(&raw.path))
+					.flatten()
 				});
 
 			items.push(Item {

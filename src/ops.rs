@@ -141,6 +141,19 @@ impl Op {
 			Self::Text { .. } => OpKind::Text,
 		}
 	}
+
+	/// The sources this operation would move, rename or remove. A running or
+	/// suspended item must not be disturbed, so the engine refuses the op when
+	/// one of these paths owns an active item.
+	pub fn disturbed_sources(&self) -> Vec<PathBuf> {
+		match self {
+			Self::Rename { path, .. } => vec![path.clone()],
+			Self::Move { sources, .. } => sources.clone(),
+			Self::Delete { paths } | Self::Trash { paths } | Self::Destroy { paths } => paths.clone(),
+			Self::Paste { snapshot, .. } if snapshot.cut => snapshot.paths.clone(),
+			_ => Vec::new(),
+		}
+	}
 }
 
 impl OpKind {

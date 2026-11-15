@@ -43,6 +43,12 @@ pub enum Notice {
 	LaunchBlocked {
 		reason: LaunchBlockReason,
 	},
+	/// A rename, move or delete was refused because the item is running or
+	/// suspended. The frontend supplies the text.
+	ItemBusy {
+		action: OpKind,
+		names: Vec<String>,
+	},
 }
 
 /// Work the frontend must render or complete itself.

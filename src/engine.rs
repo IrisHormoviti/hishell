@@ -26,7 +26,7 @@ use crate::jobs::{JobEvent, JobHandle, JobId, Jobs};
 use crate::location::Location;
 use crate::navigation::{NavigationPlan, NavigationRequest, PathRelation, SlotAnchor, relation};
 use crate::progress::{ProgressAction, ProgressControl};
-use crate::prompt::{FrontendRequest, Prompt};
+use crate::prompt::{FrontendRequest, Notice, Prompt};
 use crate::selection::Selection;
 use crate::view::{
 	FocusSpec, FolderMode, FolderView, InteractionSpec, ListSpec, PaneId, Preview, ViewRequest,
@@ -150,6 +150,7 @@ pub enum Effect {
 	LaunchEvent(LaunchEvent),
 	FocusActivate(ItemId),
 	Prompt(Prompt),
+	Notice(Notice),
 	Frontend(FrontendRequest),
 }
 
@@ -457,6 +458,39 @@ impl Engine {
 		Ok(self.reload())
 	}
 
+	/// A rename, move or delete that would disturb a running or suspended
+	/// item. The path itself, or any folder that contains it, is off limits
+	/// while the item is active: a frozen app keeps its path, and a savestate
+	/// entry is offered again by the shell.
+	fn busy_conflict(&self, op: &crate::ops::Op) -> Option<Notice> {
+		let sources = op.disturbed_sources();
+		if sources.is_empty() {
+			return None;
+		}
+		let active = self.execution.active_items();
+		if active.is_empty() {
+			return None;
+		}
+		let mut names = Vec::new();
+		for source in &sources {
+			if active
+				.iter()
+				.any(|item| item == source || item.starts_with(source))
+			{
+				names.push(
+					source
+						.file_name()
+						.map(|name| name.to_string_lossy().into_owned())
+						.unwrap_or_else(|| source.display().to_string()),
+				);
+			}
+		}
+		(!names.is_empty()).then(|| Notice::ItemBusy {
+			action: op.kind(),
+			names,
+		})
+	}
+
 	pub fn dispatch(&mut self, command: Command) -> Result<Outcome, Error> {
 		let changes = match command {
 			Command::SetConfig { key, value } => {
@@ -556,6 +590,9 @@ impl Engine {
 				return Ok(self.navigate(plan, true));
 			}
 			Command::Run(op) => {
+				if let Some(notice) = self.busy_conflict(&op) {
+					return Ok(outcome(vec![Effect::Notice(notice)]));
+				}
 				let job = self.jobs.submit(op);
 				self.running_jobs.insert(job.id(), job.clone());
 				return Ok(Outcome {
@@ -2120,6 +2157,7 @@ mod tests {
 			| Effect::LaunchEvent(_)
 			| Effect::FocusActivate(_)
 			| Effect::Prompt(_)
+			| Effect::Notice(_)
 			| Effect::Frontend(_) => panic!("expected a navigation plan"),
 		}
 		std::fs::remove_dir_all(path).unwrap();
