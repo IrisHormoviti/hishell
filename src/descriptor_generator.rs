@@ -11,8 +11,8 @@
 //!
 //! ```ini
 //! [Descriptor Generator Entry]
-//! TryExec=clam-nds-descriptor
-//! Exec=clam-nds-descriptor %i %o
+//! TryExec=nds-descriptor
+//! Exec=nds-descriptor %i %o
 //! MimeType=application/vnd.nintendo.nitro.rom;
 //! Icon=application-x-nintendo-ds-rom
 //! ```

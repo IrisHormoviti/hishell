@@ -55,8 +55,8 @@ pub use entry::{Entry, EntryType, NumberField};
 pub use error::Error;
 pub use execution::{
 	AppId, Clock, Execution, ExecutionWrapper, ExitStatus, FreeDesktopSpawner, LaunchBlockReason,
-	LaunchError, LaunchEvent, LaunchId, LaunchOutcome, LaunchRequest, LaunchWarning, SpawnRequest,
-	Spawner, SystemClock,
+	LaunchError, LaunchEvent, LaunchHook, LaunchId, LaunchOutcome, LaunchRequest, LaunchWarning,
+	SpawnRequest, Spawner, SystemClock,
 };
 pub use focus::{Direction, Focus, FocusCommand};
 pub use folder::ScanOptions;

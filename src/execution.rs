@@ -136,6 +136,32 @@ pub trait Spawner: Send + Sync {
 	}
 }
 
+/// Host-specific side effects around a launch.
+///
+/// The core is host-agnostic: it knows a program's panel hint and launch
+/// animation, but not how a particular session expresses them. A frontend
+/// supplies this to add environment, announce a launch for a compositor, or
+/// withdraw that announcement when the spawn fails.
+pub trait LaunchHook: Send + Sync {
+	/// Extra environment for the spawned program.
+	fn environment(&self, request: &SpawnRequest) -> Vec<(String, String)> {
+		let _ = request;
+		Vec::new()
+	}
+
+	/// Called when an announced launch starts. Returns a marker path the hook
+	/// wrote, so a failed spawn can withdraw it.
+	fn announce(&self, request: &SpawnRequest) -> Option<PathBuf> {
+		let _ = request;
+		None
+	}
+
+	/// Withdraw an announcement whose spawn failed.
+	fn withdraw(&self, marker: &Path) {
+		let _ = std::fs::remove_file(marker);
+	}
+}
+
 pub trait Clock: Send + Sync {
 	fn now_ms(&self) -> u64;
 }
@@ -153,7 +179,18 @@ impl Clock for SystemClock {
 	}
 }
 
-pub struct FreeDesktopSpawner;
+/// The default spawner. It runs the program directly, or through the
+/// configured wrapper, and applies the frontend's [`LaunchHook`].
+#[derive(Default)]
+pub struct FreeDesktopSpawner {
+	hook: Option<Arc<dyn LaunchHook>>,
+}
+
+impl FreeDesktopSpawner {
+	pub fn new(hook: Option<Arc<dyn LaunchHook>>) -> Self {
+		Self { hook }
+	}
+}
 
 impl Spawner for FreeDesktopSpawner {
 	fn command_exists(&self, command: &str) -> bool {
@@ -177,7 +214,7 @@ impl Spawner for FreeDesktopSpawner {
 		command.arg("--preflight");
 		command.arg(&request.program);
 		command.args(&request.args);
-		apply_environment(&mut command, request);
+		apply_environment(&mut command, request, self.hook.as_ref());
 		let output = command.output().ok()?;
 		let message = String::from_utf8_lossy(&output.stdout).trim().to_string();
 		(!message.is_empty()).then_some(message)
@@ -201,21 +238,23 @@ impl Spawner for FreeDesktopSpawner {
 				command
 			}
 		};
-		apply_environment(&mut command, request);
+		apply_environment(&mut command, request, self.hook.as_ref());
 		if let Some(cwd) = &request.cwd {
 			command.current_dir(cwd);
 		}
-		let marker = request
-			.announce
-			.then(|| announce_launch(&request.animation, &request.item))
-			.flatten();
+		let marker = if request.announce {
+			self.hook.as_ref().and_then(|hook| hook.announce(request))
+		} else {
+			None
+		};
 		match command.spawn() {
 			Ok(_) => Ok(()),
 			Err(error) => {
-				// The compositor treats a missing marker as a withdrawn launch
-				// and fades the wash out. Without this, a synchronous spawn
-				// failure would leave the panels covered for the 8 s cap.
-				withdraw_launch(marker.as_deref());
+				// A hook that announced the launch withdraws it, so a
+				// synchronous spawn failure does not leave the host waiting.
+				if let (Some(hook), Some(marker)) = (self.hook.as_ref(), marker.as_ref()) {
+					hook.withdraw(marker);
+				}
 				Err(LaunchError::Spawn(error.to_string()))
 			}
 		}
@@ -292,7 +331,11 @@ impl Execution {
 	}
 
 	pub fn free_desktop(wrapper: Option<ExecutionWrapper>) -> Self {
-		Self::new(wrapper, Arc::new(FreeDesktopSpawner), Arc::new(SystemClock))
+		Self::new(
+			wrapper,
+			Arc::new(FreeDesktopSpawner::default()),
+			Arc::new(SystemClock),
+		)
 	}
 
 	pub fn set_wrapper(&mut self, wrapper: Option<ExecutionWrapper>) {
@@ -785,54 +828,21 @@ fn entry_execution_wrapper(entry_path: &Path) -> Option<String> {
 	(!wrapper.trim().is_empty()).then_some(wrapper)
 }
 
-fn apply_environment(command: &mut Command, request: &SpawnRequest) {
+fn apply_environment(
+	command: &mut Command,
+	request: &SpawnRequest,
+	hook: Option<&Arc<dyn LaunchHook>>,
+) {
 	if !request.item.as_os_str().is_empty() {
 		command.env(ITEM_ENV, &request.item);
 	}
 	if !request.name.is_empty() {
 		command.env(NAME_ENV, &request.name);
 	}
-	if let Some(display) = request.main_display.filter(|display| *display >= 0) {
-		// The compositor's per-client panel hint. A single index keeps every
-		// window of this app on the requested panel.
-		command.env("CLAM_WINDOW_ORDER", display.to_string());
-	}
-}
-
-fn announce_launch(animation: &str, item: &Path) -> Option<PathBuf> {
-	let animation = animation.trim();
-	let colour = match animation {
-		"white" => "white",
-		"black" => "black",
-		_ => "none",
-	};
-	let path = match std::env::var("CLAM_LAUNCH_MARKER") {
-		Ok(path) if !path.is_empty() => PathBuf::from(path),
-		_ => {
-			let dir = std::env::var("CLAM_APP_MANAGER_DIR")
-				.unwrap_or_else(|_| String::from("/tmp/clam-app-manager"));
-			PathBuf::from(dir).join("launch")
+	if let Some(hook) = hook {
+		for (key, value) in hook.environment(request) {
+			command.env(key, value);
 		}
-	};
-	if let Some(parent) = path.parent() {
-		let _ = std::fs::create_dir_all(parent);
-	}
-	let nonce = SystemTime::now()
-		.duration_since(UNIX_EPOCH)
-		.map(|elapsed| elapsed.as_nanos())
-		.unwrap_or(0);
-	let text = format!("{colour}\n{nonce}\n{}\n", item.to_string_lossy());
-	let temporary = path.with_extension("tmp");
-	if std::fs::write(&temporary, text).is_ok() {
-		let _ = std::fs::rename(&temporary, &path);
-		return Some(path);
-	}
-	None
-}
-
-fn withdraw_launch(path: Option<&Path>) {
-	if let Some(path) = path {
-		let _ = std::fs::remove_file(path);
 	}
 }
 
@@ -999,12 +1009,12 @@ mod tests {
 		let outcome = execution
 			.request(LaunchRequest::Text {
 				path: entry,
-				value: String::from("Clam"),
+				value: String::from("Ada"),
 			})
 			.unwrap();
 		assert_eq!(outcome, LaunchOutcome::Started);
 		let spawned = spawner.spawned.lock().unwrap();
-		assert_eq!(spawned[0].1.args, vec!["Clam"]);
+		assert_eq!(spawned[0].1.args, vec!["Ada"]);
 		assert!(!spawned[0].1.announce);
 		std::fs::remove_dir_all(root).unwrap();
 	}
@@ -1059,7 +1069,18 @@ mod tests {
 	}
 
 	#[test]
-	fn main_display_becomes_the_compositor_panel_hint() {
+	fn the_launch_hook_supplies_environment() {
+		struct PanelHook;
+		impl LaunchHook for PanelHook {
+			fn environment(&self, request: &SpawnRequest) -> Vec<(String, String)> {
+				request
+					.main_display
+					.filter(|display| *display >= 0)
+					.map(|display| vec![(String::from("APP_PANEL"), display.to_string())])
+					.unwrap_or_default()
+			}
+		}
+		let hook: Arc<dyn LaunchHook> = Arc::new(PanelHook);
 		let mut command = Command::new("true");
 		apply_environment(
 			&mut command,
@@ -1076,10 +1097,11 @@ mod tests {
 				wrapper_override: None,
 				track_active: false,
 			},
+			Some(&hook),
 		);
 		let value = command
 			.get_envs()
-			.find(|(key, _)| *key == "CLAM_WINDOW_ORDER")
+			.find(|(key, _)| *key == "APP_PANEL")
 			.and_then(|(_, value)| value)
 			.map(|value| value.to_string_lossy().into_owned());
 		assert_eq!(value.as_deref(), Some("0"));
@@ -1092,7 +1114,7 @@ mod tests {
 		std::fs::write(
 			&entry,
 			"[Desktop Entry]\nType=Application\nName=Viewer\nExec=viewer %f\n\n\
-			 [Execution]\nExecutionWrapper=clam-applet\n",
+			 [Execution]\nExecutionWrapper=applet-wrapper\n",
 		)
 		.unwrap();
 		let spawner = Arc::new(FakeSpawner {
@@ -1101,7 +1123,7 @@ mod tests {
 		});
 		let mut execution = Execution::new(
 			Some(ExecutionWrapper {
-				command: String::from("clam-guest"),
+				command: String::from("guest-wrapper"),
 			}),
 			spawner.clone(),
 			Arc::new(SystemClock),
@@ -1112,7 +1134,7 @@ mod tests {
 		assert_eq!(outcome, LaunchOutcome::Started);
 		let spawned = spawner.spawned.lock().unwrap();
 		assert_eq!(spawned.len(), 1);
-		assert_eq!(spawned[0].0.as_deref(), Some("clam-applet"));
+		assert_eq!(spawned[0].0.as_deref(), Some("applet-wrapper"));
 		std::fs::remove_dir_all(root).unwrap();
 	}
 
@@ -1126,7 +1148,7 @@ mod tests {
 		});
 		let mut execution = Execution::new(
 			Some(ExecutionWrapper {
-				command: String::from("clam-guest"),
+				command: String::from("guest-wrapper"),
 			}),
 			spawner.clone(),
 			Arc::new(SystemClock),
@@ -1135,7 +1157,7 @@ mod tests {
 			.request(LaunchRequest::Item { path: entry })
 			.unwrap();
 		let spawned = spawner.spawned.lock().unwrap();
-		assert_eq!(spawned[0].0.as_deref(), Some("clam-guest"));
+		assert_eq!(spawned[0].0.as_deref(), Some("guest-wrapper"));
 		std::fs::remove_dir_all(root).unwrap();
 	}
 

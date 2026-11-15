@@ -253,9 +253,9 @@ fn application_entries() -> Vec<(String, PathBuf)> {
 
 fn default_application(mime: &str) -> Option<String> {
 	// `mimeapps.list` lives in the config directories, but the desktop spec
-	// also allows it beside the applications it names. ClamOS writes its
-	// libretro defaults to $XDG_DATA_HOME/clam-libretro/applications, which is
-	// on XDG_DATA_DIRS; the user's own config directories still win.
+	// also allows it beside the applications it names. A frontend can ship
+	// its defaults in a data directory's `applications/`, which is on
+	// XDG_DATA_DIRS; the user's own config directories still win.
 	let config_lists = config_dirs()
 		.into_iter()
 		.map(|dir| dir.join("mimeapps.list"));

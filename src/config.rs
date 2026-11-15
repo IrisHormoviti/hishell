@@ -525,11 +525,6 @@ impl Config {
 	}
 
 	/// The folder entries in the header layout.
-	///
-	/// `Header` lists toolkit widgets (`toolkit/PathBar`) and folders. A folder
-	/// entry docks a `FolderView` into the header; that is how the shell asks
-	/// for an applet strip, and where it lives. The shell resolves the path,
-	/// since only it knows the session root.
 	pub fn header_folders(&self) -> impl Iterator<Item = &str> + '_ {
 		self.header_layout
 			.iter()

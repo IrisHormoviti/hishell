@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use crate::config_parser::{ConfigParser, ConfigValue};
 
-pub const RUNTIME_ROOT: &str = "/run/clam-removable/directories";
 const REFRESH: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -93,8 +92,18 @@ fn roots() -> Vec<PathBuf> {
 	if let Some(dir) = dirs::data_dir() {
 		roots.push(dir.join("hishell/directories"));
 	}
-	roots.push(PathBuf::from(RUNTIME_ROOT));
+	roots.extend(runtime_roots());
 	roots
+}
+
+/// Runtime descriptor roots the host exports, colon-separated in
+/// `HISHELL_RUNTIME_DIRS`. A session service writes live descriptors for
+/// mounted devices here; the data directories and the cache are always read.
+fn runtime_roots() -> Vec<PathBuf> {
+	std::env::var("HISHELL_RUNTIME_DIRS")
+		.ok()
+		.map(|value| std::env::split_paths(&value).collect())
+		.unwrap_or_default()
 }
 
 fn read_root(root: &Path, map: &mut HashMap<PathBuf, Descriptor>) {

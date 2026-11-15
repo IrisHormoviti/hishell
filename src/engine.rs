@@ -15,8 +15,8 @@ use crate::change::{
 use crate::config::{Config, ConfigKey, ConfigLoad, ConfigValue};
 use crate::error::Error;
 use crate::execution::{
-	Execution, ExecutionWrapper, LaunchEvent, LaunchId, LaunchOutcome, LaunchRequest, Spawner,
-	SystemClock,
+	Execution, ExecutionWrapper, LaunchEvent, LaunchHook, LaunchId, LaunchOutcome, LaunchRequest,
+	Spawner, SystemClock,
 };
 use crate::focus::{Focus, FocusCommand};
 use crate::folder::{Folder, ScanOptions};
@@ -54,6 +54,8 @@ pub struct RuntimeSettings {
 pub struct Deps {
 	pub spawner: Option<Arc<dyn Spawner>>,
 	pub platform: crate::platform::Platform,
+	/// Host-specific launch side effects; see [`LaunchHook`].
+	pub launch_hook: Option<Arc<dyn LaunchHook>>,
 }
 
 impl std::fmt::Debug for Deps {
@@ -62,6 +64,7 @@ impl std::fmt::Debug for Deps {
 			.debug_struct("Deps")
 			.field("spawner", &self.spawner.is_some())
 			.field("platform", &self.platform)
+			.field("launch_hook", &self.launch_hook.is_some())
 			.finish()
 	}
 }
@@ -210,11 +213,11 @@ impl Engine {
 		if !location.path().exists() {
 			return Err(Error::NotFound(location.path().to_path_buf()));
 		}
-		let spawner = options
-			.deps
-			.spawner
-			.clone()
-			.unwrap_or_else(|| Arc::new(crate::execution::FreeDesktopSpawner));
+		let spawner = options.deps.spawner.clone().unwrap_or_else(|| {
+			Arc::new(crate::execution::FreeDesktopSpawner::new(
+				options.deps.launch_hook.clone(),
+			))
+		});
 		let wrapper = options
 			.runtime
 			.execution_wrapper
@@ -976,7 +979,7 @@ impl Engine {
 			return Ok(Outcome::default());
 		}
 		// A choice in a `[Radio]` folder is selected, not launched: the
-		// folder owns the stored value and its `[Radio] Exec`. `clam-configd`
+		// folder owns the stored value and its `[Radio] Exec`. A provider
 		// writes its choices as `Type=Button`.
 		if self.is_radio_member(&item.path) {
 			return self.select_radio(item);
@@ -1110,7 +1113,7 @@ impl Engine {
 	pub fn control_state(&self, item: &Item) -> crate::item::ControlState {
 		use crate::item::{ControlState, ItemKind};
 		// A `[Radio]` folder makes every direct child a choice, whatever its
-		// entry type; `clam-configd` writes its zones as `Type=Button`.
+		// entry type; a provider writes its zones as `Type=Button`.
 		if self.is_radio_member(&item.path) {
 			return ControlState::Radio {
 				selected: !self.config.radio_selected.is_empty()
