@@ -61,7 +61,7 @@ pub use execution::{
 	SpawnRequest, Spawner, SystemClock,
 };
 pub use focus::{Direction, Focus, FocusCommand};
-pub use folder::ScanOptions;
+pub use folder::{ProgressRefresh, ScanOptions};
 pub use history::{History, HistoryCommand, HistoryEntry, HistoryStatus};
 pub use item::{ControlState, FsKind, IconRef, Item, ItemId, ItemKind};
 pub use jobs::{CancelToken, JobEvent, JobHandle, JobId, Jobs};
@@ -84,8 +84,8 @@ pub use session::{SCHEMA_VERSION, SessionData, SessionStore};
 pub use thumbnail::FreeDesktopThumbnailer;
 pub use value::ConfigValue;
 pub use view::{
-	FileView, FolderMode, FolderView, GridMode, GridSizing, GridSpec, Metrics, PaneId, ViewRequest,
-	ViewSpec, Viewport,
+	FileView, FolderMode, FolderView, GridExtent, GridMode, GridSizing, GridSpec, Metrics, PaneId,
+	ViewRequest, ViewSpec, Viewport,
 };
 
 pub mod prelude {
@@ -103,6 +103,6 @@ pub mod prelude {
 	pub use crate::selection::{Selection, SelectionStatus};
 	pub use crate::value::ConfigValue;
 	pub use crate::view::{
-		FolderMode, FolderView, GridMode, GridSizing, GridSpec, ViewRequest, ViewSpec,
+		FolderMode, FolderView, GridExtent, GridMode, GridSizing, GridSpec, ViewRequest, ViewSpec,
 	};
 }

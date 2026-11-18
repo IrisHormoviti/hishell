@@ -38,6 +38,18 @@ pub struct Folder {
 	diagnostics: Vec<crate::config::ConfigDiagnostic>,
 }
 
+/// What an in-place `[Progress]` refresh changed.
+///
+/// A sidecar rewrite changes neither the item's name nor its position, so the
+/// view can patch the affected rows instead of scanning and rebuilding the
+/// whole folder. `structural` is set when a cleared group leaves an item that
+/// only existed because of it, which needs a rescan.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProgressRefresh {
+	pub changed: Vec<ItemId>,
+	pub structural: bool,
+}
+
 struct RawEntry {
 	name: String,
 	path: PathBuf,
@@ -313,6 +325,39 @@ impl Folder {
 		&self.diagnostics
 	}
 
+	/// Re-read the `[Progress]` group of every busy item, without touching the
+	/// directory.
+	///
+	/// This is the cheap path a frontend polls while a download writes its
+	/// sidecar: the item set and its order are unchanged, only the group is.
+	/// Non-busy items are left alone; a group that appears on one of them
+	/// changes the folder's entries, which a scan already covers.
+	pub fn refresh_progress(&mut self) -> ProgressRefresh {
+		let mut refresh = ProgressRefresh::default();
+		for item in self.items.iter_mut().filter(|item| item.is_busy()) {
+			let Some(entry_path) = item.entry_path.clone() else {
+				continue;
+			};
+			let progress = match crate::entry::Entry::read(&entry_path, item.fs_kind) {
+				Some(entry) => entry.progress,
+				// A writer may replace its sidecar atomically; a path that is
+				// still there but unreadable is a transient, not a finish.
+				None if entry_path.exists() => continue,
+				None => None,
+			};
+			if progress == item.progress {
+				continue;
+			}
+			let cleared = progress.is_none();
+			item.progress = progress;
+			refresh.changed.push(item.id);
+			if cleared && !item.path.exists() {
+				refresh.structural = true;
+			}
+		}
+		refresh
+	}
+
 	/// Apply the folder's sort and grouping. Called after a scan and after any
 	/// config change that affects item order.
 	pub fn apply_config(&mut self, config: &Config) {
@@ -576,6 +621,80 @@ mod tests {
 		assert_eq!(item.name, "movie");
 		assert_eq!(item.title, "Movie");
 		assert!(item.is_busy());
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn progress_refresh_updates_the_item_without_a_rescan() {
+		let root = tree("refresh");
+		std::fs::write(
+			root.join("movie.mkv.desktop"),
+			"[Desktop Entry]\nType=File\nName=Movie\n\
+			 [Progress]\nValue=1\nTarget=10\nTaskName=Downloading...\n",
+		)
+		.unwrap();
+		let mut folder = Folder::scan(&root);
+		let id = folder.items()[0].id;
+		std::fs::write(
+			root.join("movie.mkv.desktop"),
+			"[Desktop Entry]\nType=File\nName=Movie\n\
+			 [Progress]\nValue=7\nTarget=10\nTaskName=Downloading...\n",
+		)
+		.unwrap();
+
+		let refresh = folder.refresh_progress();
+		assert_eq!(refresh.changed, vec![id]);
+		assert!(!refresh.structural);
+		assert_eq!(
+			folder
+				.item(id)
+				.unwrap()
+				.progress
+				.as_ref()
+				.unwrap()
+				.percent(),
+			70
+		);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn clearing_progress_keeps_an_existing_target_in_place() {
+		let root = tree("refresh-done");
+		let target = root.join("movie.mkv");
+		std::fs::write(&target, b"done").unwrap();
+		std::fs::write(
+			root.join("movie.mkv.desktop"),
+			"[Desktop Entry]\nType=File\nName=Movie\n\
+			 [Progress]\nValue=10\nTarget=10\n",
+		)
+		.unwrap();
+		let mut folder = Folder::scan(&root);
+		let id = folder.items()[0].id;
+		std::fs::remove_file(root.join("movie.mkv.desktop")).unwrap();
+
+		let refresh = folder.refresh_progress();
+		assert_eq!(refresh.changed, vec![id]);
+		assert!(!refresh.structural);
+		assert!(!folder.item(id).unwrap().is_busy());
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn clearing_progress_for_a_missing_target_needs_a_rescan() {
+		let root = tree("refresh-gone");
+		std::fs::write(
+			root.join("movie.mkv.desktop"),
+			"[Desktop Entry]\nType=File\nName=Movie\n\
+			 [Progress]\nValue=1\nTarget=10\n",
+		)
+		.unwrap();
+		let mut folder = Folder::scan(&root);
+		assert_eq!(folder.len(), 1);
+		std::fs::remove_file(root.join("movie.mkv.desktop")).unwrap();
+
+		let refresh = folder.refresh_progress();
+		assert!(refresh.structural);
 		std::fs::remove_dir_all(root).unwrap();
 	}
 }

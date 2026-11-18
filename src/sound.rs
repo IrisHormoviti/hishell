@@ -35,6 +35,10 @@ pub const WINDOW_OPEN: &str = "window-new";
 pub const WINDOW_CLOSE: &str = "window-close";
 /// A dialog or a menu appeared.
 pub const DIALOG_OPEN: &str = "dialog-open";
+/// A panel or menu expanded.
+pub const MENU_OPEN: &str = "menu-popup";
+/// A panel or menu collapsed.
+pub const MENU_CLOSE: &str = "menu-popdown";
 /// A dialog was accepted.
 pub const DIALOG_OK: &str = "dialog-ok";
 /// A dialog was cancelled.
@@ -47,8 +51,14 @@ pub const DRAG_START: &str = "drag-start";
 pub const DRAG_ACCEPT: &str = "drag-accept";
 /// A drag dropped where nothing takes it.
 pub const DRAG_FAIL: &str = "drag-fail";
-/// One row of a scroll.
-pub const SCROLL_TICK: &str = "scroll-down";
+/// A slider, or a segmented control, stepped to a new value.
+pub const SLIDER_TICK: &str = "slider-tick";
+/// One row of a vertical scroll, away from the start and back to it.
+pub const SCROLL_DOWN: &str = "scroll-down";
+pub const SCROLL_UP: &str = "scroll-up";
+/// One column of a horizontal scroll, away from the start and back to it.
+pub const SCROLL_LEFT: &str = "scroll-left";
+pub const SCROLL_RIGHT: &str = "scroll-right";
 /// A scroll reached an end.
 pub const SCROLL_EDGE: &str = "scroll-edge";
 
@@ -79,7 +89,12 @@ const LATENCY: &str = "20ms";
 
 /// Play a sound event without waiting for it.
 pub fn play(event: &str) {
-	player().dispatch(Message::Play(event.to_string()));
+	let player = player();
+	// A stream that died — PipeWire restarted, or a spawn that failed while
+	// the server was still coming up — is replaced before the event is handed
+	// to it, so the event is late once rather than lost.
+	player.dispatch(Message::Open);
+	player.dispatch(Message::Play(event.to_string()));
 }
 
 /// The same, behind the [`crate::SoundPlayer`] trait, so a frontend can hand
@@ -102,6 +117,15 @@ pub fn open() {
 	player().dispatch(Message::Open);
 }
 
+/// Stop whatever is sounding and drop it.
+///
+/// A frontend calls this when the session comes back from something that
+/// held it: the guest that owned the screens is gone, and a confirmation that
+/// was half played must not resume as if the shell had never left.
+pub fn flush() {
+	player().dispatch(Message::Flush);
+}
+
 /// Close the playback stream.
 ///
 /// A silent playback stream is not free: it is a node in the audio graph and
@@ -113,6 +137,7 @@ pub fn close() {
 enum Message {
 	Open,
 	Close,
+	Flush,
 	Play(String),
 }
 
@@ -172,11 +197,18 @@ struct Clip {
 	offset: usize,
 }
 
-/// The player thread: one open stream, silence between events.
+/// How many events may sound at once. A press, its release and the action
+/// they started can overlap; past this many, the oldest is dropped.
+const VOICES: usize = 8;
+
+/// The player thread: one open stream, every event mixed in as it arrives.
+///
+/// Events are summed, not queued: a confirmation that lasts two seconds must
+/// not hold back the tick after it, and a release that follows its press a few
+/// microseconds later must not silence the action they started.
 fn run(receiver: Receiver<Message>) {
 	let mut stream: Option<Stream> = None;
-	let mut waiting: Vec<Clip> = Vec::new();
-	let mut playing: Option<Clip> = None;
+	let mut active: Vec<Clip> = Vec::new();
 	let mut chunk = vec![0u8; CHUNK_BYTES];
 
 	loop {
@@ -204,47 +236,61 @@ fn run(receiver: Receiver<Message>) {
 				}
 				Message::Close => {
 					stream = None;
-					waiting.clear();
-					playing = None;
+					active.clear();
+				}
+				Message::Flush => {
+					active.clear();
+					// The stream already holds silence up to its latency; the
+					// voices are what would otherwise resume.
 				}
 				Message::Play(event) => {
 					if let Some(frames) = load(&event) {
-						waiting.push(Clip { frames, offset: 0 });
+						if active.len() >= VOICES {
+							active.remove(0);
+						}
+						active.push(Clip { frames, offset: 0 });
 					}
 				}
 			}
 		}
 
-		let Some(active) = stream.as_mut() else {
+		let Some(active_stream) = stream.as_mut() else {
 			continue;
 		};
 
-		let mut filled = 0;
-		while filled < CHUNK_BYTES {
-			let clip = match playing.as_mut() {
-				Some(clip) => clip,
-				None => match waiting.pop() {
-					Some(clip) => playing.insert(clip),
-					None => break,
-				},
-			};
-			if clip.offset >= clip.frames.len() {
-				playing = None;
-				continue;
-			}
-			let take = (clip.frames.len() - clip.offset).min(CHUNK_BYTES - filled);
-			chunk[filled..filled + take]
-				.copy_from_slice(&clip.frames[clip.offset..clip.offset + take]);
+		// Sum every voice into one chunk; what is left is silence.
+		chunk.fill(0);
+		let mut finished = 0;
+		for clip in active.iter_mut() {
+			let take = (clip.frames.len() - clip.offset).min(CHUNK_BYTES);
+			mix(
+				&mut chunk[..take],
+				&clip.frames[clip.offset..clip.offset + take],
+			);
 			clip.offset += take;
-			filled += take;
+			if clip.offset >= clip.frames.len() {
+				finished += 1;
+			}
 		}
-		chunk[filled..].fill(0);
+		if finished > 0 {
+			active.retain(|clip| clip.offset < clip.frames.len());
+		}
 
 		// This blocks while PipeWire's buffer is full, which is what paces the
 		// stream to the sample rate.
-		if active.stdin.write_all(&chunk).is_err() {
+		if active_stream.stdin.write_all(&chunk).is_err() {
 			stream = None;
 		}
+	}
+}
+
+/// Add stereo 16-bit frames into `into`, saturating instead of wrapping.
+fn mix(into: &mut [u8], frames: &[u8]) {
+	for (target, source) in into.chunks_exact_mut(2).zip(frames.chunks_exact(2)) {
+		let a = i16::from_le_bytes([target[0], target[1]]) as i32;
+		let b = i16::from_le_bytes([source[0], source[1]]) as i32;
+		let sum = (a + b).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+		target.copy_from_slice(&sum.to_le_bytes());
 	}
 }
 
@@ -256,7 +302,7 @@ struct Stream {
 
 impl Stream {
 	fn open() -> Option<Self> {
-		let mut child = Command::new("pw-cat")
+		let mut child = match Command::new("pw-cat")
 			.args([
 				"--playback",
 				"--raw",
@@ -274,7 +320,15 @@ impl Stream {
 			.stdout(Stdio::null())
 			.stderr(Stdio::null())
 			.spawn()
-			.ok()?;
+		{
+			Ok(child) => child,
+			Err(error) => {
+				// A session without a sound server is not a failure worth
+				// stopping for, but it should not be invisible either.
+				eprintln!("hishell: cannot start pw-cat: {error}");
+				return None;
+			}
+		};
 		let stdin = child.stdin.take()?;
 		// The pipe is where an event waits when the thread is behind: a full
 		// one would hold a third of a second of silence ahead of it.
@@ -493,5 +547,46 @@ mod tests {
 	#[test]
 	fn refuses_a_non_pcm_file() {
 		assert_eq!(pcm(b"OggS not a wav"), None);
+	}
+
+	/// The theme's committed PCM twins must match the stream. A regenerated
+	/// theme that kept the 3DS source rate would otherwise be silent.
+	#[test]
+	fn the_shipped_theme_has_a_twin_for_every_event_the_shell_plays() {
+		let root =
+			std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/sounds/3ds/stereo");
+		let events = [
+			"item-focus",
+			"window-new",
+			"window-close",
+			"dialog-open",
+			"dialog-ok",
+			"dialog-cancel",
+			"dialog-error",
+			"drag-start",
+			"drag-accept",
+			"drag-fail",
+			"scroll-down",
+			"scroll-up",
+			"scroll-left",
+			"scroll-right",
+			"scroll-edge",
+			"slider-tick",
+			"menu-popup",
+			"menu-popdown",
+			"button-pressed",
+			"button-released",
+		];
+		for event in events {
+			let path = root.join(format!("{event}.wav"));
+			let bytes = std::fs::read(&path).unwrap_or_else(|error| {
+				panic!("{}: {error}", path.display());
+			});
+			assert!(
+				pcm(&bytes).is_some_and(|frames| !frames.is_empty()),
+				"{} is not 48 kHz stereo 16-bit PCM",
+				path.display()
+			);
+		}
 	}
 }

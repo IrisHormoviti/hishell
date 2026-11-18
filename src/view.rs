@@ -426,11 +426,29 @@ pub enum GridSizing {
 pub struct GridSpec {
 	pub sizing: GridSizing,
 	pub lines: u8,
+	/// The cells the viewport shows without scrolling: columns and rows. The
+	/// cell size is fitted so both counts are whole; a partial slot never
+	/// straddles the edge of the pane.
+	pub visible: GridExtent,
 	pub icon_size: f64,
 	pub cell: Size,
 	pub gap: f64,
 	pub labels: LabelSpec,
 	pub horizontal: bool,
+}
+
+#[derive(
+	Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct GridExtent {
+	pub columns: u32,
+	pub rows: u32,
+}
+
+impl GridExtent {
+	pub fn is_empty(self) -> bool {
+		self.columns == 0 || self.rows == 0
+	}
 }
 
 #[derive(
@@ -466,6 +484,9 @@ pub struct HeaderSpec {
 	pub group: u16,
 	pub cell: (u32, u32),
 	pub rect: Rect,
+	/// A horizontal grid reserves a narrow column for each group heading.
+	/// The frontend rotates that label to read along the group.
+	pub rotated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -497,6 +518,10 @@ pub struct FolderView {
 	pub grouping: GroupingSpec,
 	pub slots: Vec<SlotSpec>,
 	pub headers: Vec<HeaderSpec>,
+	/// The full cell grid the view navigates, including empty cells. Free
+	/// placement extends it past the items so there is always somewhere to
+	/// drop, and empty cells are part of the view rather than a gap.
+	pub grid_extent: GridExtent,
 	pub focus: FocusSpec,
 	pub interaction: InteractionSpec,
 }
@@ -605,9 +630,41 @@ pub fn grid_spec(config: &Config, request: &ViewRequest) -> GridSpec {
 		Size::new(icon_size + small * 2.0, icon_size + small * 2.0)
 	};
 
+	// The scrolling axis has no `Lines` input, so its cell is derived from
+	// the icon. Stretch it until a whole number of cells spans the pane:
+	// scrolling then moves between columns/rows instead of exposing a sliver
+	// of the next one at the edge.
+	let scroll_main = if horizontal {
+		request.viewport.width
+	} else {
+		request.viewport.height
+	}
+	.max(1.0);
+	let scroll_cell = if horizontal { cell.width } else { cell.height };
+	let scroll_count =
+		(((scroll_main + gap) / (scroll_cell + gap)).floor() as i64).clamp(1, 255) as u32;
+	let fitted = (scroll_main + gap) / scroll_count as f64 - gap;
+	let cell = if horizontal {
+		Size::new(fitted.max(1.0), cell.height)
+	} else {
+		Size::new(cell.width, fitted.max(1.0))
+	};
+	let visible = if horizontal {
+		GridExtent {
+			columns: scroll_count,
+			rows: u32::from(lines),
+		}
+	} else {
+		GridExtent {
+			columns: u32::from(lines),
+			rows: scroll_count,
+		}
+	};
+
 	GridSpec {
 		sizing,
 		lines,
+		visible,
 		icon_size,
 		cell,
 		gap,
@@ -738,6 +795,46 @@ mod tests {
 			.unwrap();
 		let spec = grid_spec(&config, &request(400.0, 300.0));
 		assert_eq!(spec.icon_size, 72.0);
+	}
+
+	#[test]
+	fn a_horizontal_grid_fits_whole_columns_on_the_scrolling_axis() {
+		let mut config = Config::default();
+		config
+			.set(
+				ConfigKey::ScrollDirection,
+				ConfigValue::Str("HORIZONTAL".into()),
+			)
+			.unwrap();
+		config.set(ConfigKey::Lines, ConfigValue::Int(2)).unwrap();
+		let request = request(400.0, 300.0);
+		let spec = grid_spec(&config, &request);
+		let spanned = spec.visible.columns as f64 * spec.cell.width
+			+ (spec.visible.columns.saturating_sub(1)) as f64 * spec.gap;
+		assert!(
+			(spanned - request.viewport.width).abs() < 0.01,
+			"{:?} columns span {spanned}, viewport is {}",
+			spec.visible,
+			request.viewport.width
+		);
+		assert_eq!(spec.visible.rows, 2);
+	}
+
+	#[test]
+	fn a_vertical_grid_fits_whole_rows_on_the_scrolling_axis() {
+		let mut config = Config::default();
+		config.set(ConfigKey::Lines, ConfigValue::Int(3)).unwrap();
+		let request = request(400.0, 300.0);
+		let spec = grid_spec(&config, &request);
+		let spanned = spec.visible.rows as f64 * spec.cell.height
+			+ (spec.visible.rows.saturating_sub(1)) as f64 * spec.gap;
+		assert!(
+			(spanned - request.viewport.height).abs() < 0.01,
+			"{:?} rows span {spanned}, viewport is {}",
+			spec.visible,
+			request.viewport.height
+		);
+		assert_eq!(spec.visible.columns, 3);
 	}
 
 	#[test]

@@ -2,12 +2,15 @@
 
 use crate::config::Config;
 use crate::item::Item;
-use crate::view::{FolderMode, GridSpec, HeaderSpec, Rect, SlotId, SlotSpec, ViewRequest};
+use crate::view::{
+	FolderMode, GridExtent, GridSpec, HeaderSpec, Rect, SlotId, SlotSpec, ViewRequest,
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct FolderLayout {
 	pub slots: Vec<SlotSpec>,
 	pub headers: Vec<HeaderSpec>,
+	pub extent: GridExtent,
 }
 
 pub fn folder(
@@ -62,6 +65,7 @@ fn list_layout(config: &Config, request: &ViewRequest, items: &[Item]) -> Folder
 					width: request.viewport.width,
 					height: header_height,
 				},
+				rotated: false,
 			});
 			y += header_height + request.metrics.small_spacing;
 			row += 1;
@@ -91,11 +95,11 @@ fn grid_layout(
 	grid: &GridSpec,
 	items: &[Item],
 ) -> FolderLayout {
-	if items.is_empty() {
-		return FolderLayout::default();
-	}
 	if config.sort == crate::view::SortKey::Free {
 		return free_layout(config, request, grid, items);
+	}
+	if items.is_empty() {
+		return FolderLayout::default();
 	}
 
 	let grouped = config.group_mode != crate::view::GroupMode::None || config.show_stash;
@@ -119,30 +123,40 @@ fn plain_grid(grid: &GridSpec, items: &[Item]) -> FolderLayout {
 	} else {
 		lines
 	};
+	let rows = if grid.horizontal {
+		lines
+	} else {
+		items.len().div_ceil(lines)
+	};
+	let slots: Vec<SlotSpec> = items
+		.iter()
+		.enumerate()
+		.map(|(index, item)| {
+			let (column, row) = if grid.horizontal {
+				(index / lines, index % lines)
+			} else {
+				(index % columns, index / columns)
+			};
+			SlotSpec {
+				id: SlotId(item.id.get()),
+				item: item.id,
+				cell: (column as u32, row as u32),
+				rect: Rect {
+					x: column as f64 * (grid.cell.width + grid.gap),
+					y: row as f64 * (grid.cell.height + grid.gap),
+					width: grid.cell.width,
+					height: grid.cell.height,
+				},
+			}
+		})
+		.collect();
 	FolderLayout {
-		slots: items
-			.iter()
-			.enumerate()
-			.map(|(index, item)| {
-				let (column, row) = if grid.horizontal {
-					(index / lines, index % lines)
-				} else {
-					(index % columns, index / columns)
-				};
-				SlotSpec {
-					id: SlotId(item.id.get()),
-					item: item.id,
-					cell: (column as u32, row as u32),
-					rect: Rect {
-						x: column as f64 * (grid.cell.width + grid.gap),
-						y: row as f64 * (grid.cell.height + grid.gap),
-						width: grid.cell.width,
-						height: grid.cell.height,
-					},
-				}
-			})
-			.collect(),
+		slots,
 		headers: Vec::new(),
+		extent: GridExtent {
+			columns: columns as u32,
+			rows: rows as u32,
+		},
 	}
 }
 
@@ -172,6 +186,7 @@ fn grouped_vertical(
 					width: natural_width,
 					height: header_height,
 				},
+				rotated: false,
 			});
 			y += header_height + gap;
 			row += 1;
@@ -195,6 +210,7 @@ fn grouped_vertical(
 		y += rows as f64 * grid.cell.height + (rows - 1) as f64 * gap + gap;
 		row += rows as u32;
 	}
+	result.extent = extent_of(&result);
 	result
 }
 
@@ -225,6 +241,7 @@ fn grouped_horizontal(
 					width: header_width,
 					height: group_height,
 				},
+				rotated: true,
 			});
 		}
 		let item_columns =
@@ -255,12 +272,33 @@ fn grouped_horizontal(
 			+ span as f64 * gap;
 		column += span as u32;
 	}
+	result.extent = extent_of(&result);
 	result
+}
+
+/// The cell grid a grouped layout occupies. Empty space inside groups is not
+/// added: only free placement extends the grid on purpose.
+fn extent_of(layout: &FolderLayout) -> GridExtent {
+	let mut extent = GridExtent::default();
+	for (column, row) in layout
+		.slots
+		.iter()
+		.map(|slot| (slot.cell.0, slot.cell.1))
+		.chain(
+			layout
+				.headers
+				.iter()
+				.map(|header| (header.cell.0, header.cell.1)),
+		) {
+		extent.columns = extent.columns.max(column + 1);
+		extent.rows = extent.rows.max(row + 1);
+	}
+	extent
 }
 
 fn free_layout(
 	config: &Config,
-	request: &ViewRequest,
+	_request: &ViewRequest,
 	grid: &GridSpec,
 	items: &[Item],
 ) -> FolderLayout {
@@ -278,19 +316,33 @@ fn free_layout(
 		}
 	}
 
-	let cross_fill =
-		|view: f64, item: f64| -> i32 { (((view + gap) / (item + gap)).floor() as i32).max(1) };
 	let count = items.len() as i32;
+	let screen_columns = grid.visible.columns.max(1) as i32;
+	let screen_rows = grid.visible.rows.max(1) as i32;
+	let capacity = screen_columns * screen_rows;
+	// Round the area the items need up to whole screens. A folder that fills
+	// its last screen exactly gets one more screen, so there is always an
+	// empty cell to drop into; a partly filled last screen leaves its own
+	// empty cells.
+	let rounded = |needed: i32, span: i32| -> i32 {
+		let screens = ceil_div(needed.max(1), span).max(1);
+		let mut total = screens * span;
+		if count > 0 && count == screens * capacity {
+			total += span;
+		}
+		total
+	};
 	let (columns, rows) = if horizontal {
-		let rows = grid.lines.max(1) as i32;
-		let mut columns = ceil_div(count, rows).max(min_columns);
-		columns = columns.max(cross_fill(request.viewport.width, item_width));
-		(columns.max(1), rows)
+		let rows = screen_rows;
+		let needed = ceil_div(count, rows).max(min_columns).max(1);
+		(rounded(needed, screen_columns), rows)
 	} else {
-		let columns = (grid.lines.max(1) as i32).max(min_columns);
-		let mut rows = ceil_div(count, columns).max(min_rows);
-		rows = rows.max(cross_fill(request.viewport.height, item_height));
-		(columns.max(1), rows.max(1))
+		// A vertical view scrolls on y, so its column count is fixed by the
+		// pane. Stored positions in a column that no longer fits are moved
+		// into the visible columns instead of widening the grid off screen.
+		let columns = screen_columns.max(1);
+		let needed = ceil_div(count, columns).max(min_rows).max(1);
+		(columns, rounded(needed, screen_rows))
 	};
 
 	let mut occupied = vec![vec![false; columns as usize]; rows as usize];
@@ -337,6 +389,10 @@ fn free_layout(
 			})
 			.collect(),
 		headers: Vec::new(),
+		extent: GridExtent {
+			columns: columns as u32,
+			rows: rows as u32,
+		},
 	}
 }
 

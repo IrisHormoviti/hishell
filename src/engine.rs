@@ -285,6 +285,21 @@ impl Engine {
 		self.folder.as_ref().and_then(|folder| folder.item_at(path))
 	}
 
+	/// Re-read live `[Progress]` groups without rescanning the folder.
+	///
+	/// Sidecars are data the folder already read; a writer updates only the
+	/// group, so a frontend polling a transfer must not pay for a full scan
+	/// and view rebuild every time the value changes.
+	pub fn refresh_progress(&mut self) -> crate::folder::ProgressRefresh {
+		if self.mode != Mode::Config {
+			return crate::folder::ProgressRefresh::default();
+		}
+		self.folder
+			.as_mut()
+			.map(crate::folder::Folder::refresh_progress)
+			.unwrap_or_default()
+	}
+
 	/// The controls a frontend should expose for an item with a live task.
 	///
 	/// Hishell's own transfers are controlled through their job; an external
@@ -400,7 +415,7 @@ impl Engine {
 	pub fn view(&self, request: ViewRequest) -> ViewSpec {
 		let interaction = InteractionSpec {
 			open_on_click: self.config.open_on_click,
-			focus_empty_slots: self.config.focus_empty_slots,
+			focus_empty_slots: self.empty_slots_focus(),
 			center_focus: self.config.center_focus,
 			smooth_scrolling: self.config.smooth_scrolling,
 		};
@@ -423,6 +438,7 @@ impl Engine {
 					},
 					slots: layout.slots,
 					headers: layout.headers,
+					grid_extent: layout.extent,
 					focus: FocusSpec {
 						pane: self.focus.pane(),
 						item: self.focus.item(),
@@ -1237,7 +1253,7 @@ impl Engine {
 		});
 		self.focus.apply(FocusCommand::SetEmptySlots {
 			pane,
-			enabled: self.config.focus_empty_slots,
+			enabled: self.empty_slots_focus(),
 		});
 		match command {
 			FocusCommand::First => {
@@ -1328,11 +1344,17 @@ impl Engine {
 			max_column = max_column.max(slot.cell.0 as i32);
 			max_row = max_row.max(slot.cell.1 as i32);
 		}
-		let (columns, rows) = if grid.horizontal {
-			(max_column.max((items + lines - 1) / lines - 1) + 1, lines)
-		} else {
-			(lines, max_row.max((items + lines - 1) / lines - 1) + 1)
-		};
+		let (columns, rows) =
+			if view.sort.key == crate::view::SortKey::Free && !view.grid_extent.is_empty() {
+				(
+					view.grid_extent.columns as i32,
+					view.grid_extent.rows as i32,
+				)
+			} else if grid.horizontal {
+				(max_column.max((items + lines - 1) / lines - 1) + 1, lines)
+			} else {
+				(lines, max_row.max((items + lines - 1) / lines - 1) + 1)
+			};
 		(lines as usize, grid.horizontal, columns.max(1), rows.max(1))
 	}
 
@@ -1354,6 +1376,29 @@ impl Engine {
 		self.location = Location::folder(plan.to.clone());
 		self.folder = None;
 		let changes = self.reload();
+		let order = self
+			.folder
+			.as_ref()
+			.map(|folder| folder.order().to_vec())
+			.unwrap_or_default();
+		self.focus.set_order(plan.pane, order);
+		// The cells belong to the view that was just left. Clear them so the
+		// first movement asks the next view for its own layout instead of
+		// reusing a stale cell from the old folder.
+		self.focus.apply(FocusCommand::SetPositions {
+			pane: plan.pane,
+			positions: Vec::new(),
+		});
+		// A file target is the next focus. When the navigation leaves a
+		// folder, focus the folder we came out of in its parent: the close
+		// step next to the destination is that item, so movement continues
+		// from where the user was instead of restarting at the corner.
+		let focus_path = plan.focus.clone().or_else(|| {
+			plan.close
+				.last()
+				.map(|step| step.path.clone())
+				.filter(|path| path.parent() == Some(plan.to.as_path()))
+		});
 		if record {
 			self.history.record(HistoryEntry {
 				pane: plan.pane,
@@ -1361,14 +1406,7 @@ impl Engine {
 				focus: plan.focus.clone(),
 			});
 		}
-		let order = self
-			.folder
-			.as_ref()
-			.map(|folder| folder.order().to_vec())
-			.unwrap_or_default();
-		self.focus.set_order(plan.pane, order);
-		let focus = plan
-			.focus
+		let focus = focus_path
 			.as_deref()
 			.and_then(|path| self.item_at(path).map(|item| item.id));
 		self.focus.set(plan.pane, focus);
@@ -1387,6 +1425,16 @@ impl Engine {
 				header: self.config.list_header,
 			}),
 		}
+	}
+
+	/// Empty cells only exist on a free-placement grid. In a sorted grid or a
+	/// list the gaps are group headers, not drop targets, so treating them as
+	/// empty slots makes the cursor land on a heading and skip the item after
+	/// it.
+	fn empty_slots_focus(&self) -> bool {
+		self.config.focus_empty_slots
+			&& self.config.sort == crate::view::SortKey::Free
+			&& self.config.view_mode == crate::view::ViewMode::Grid
 	}
 
 	fn selection_changes(&mut self, change: impl FnOnce(&mut Selection, &[ItemId])) -> ChangeSet {
@@ -1447,7 +1495,7 @@ impl Engine {
 		let pane = self.focus.pane();
 		self.focus.apply(FocusCommand::SetEmptySlots {
 			pane,
-			enabled: self.config.focus_empty_slots,
+			enabled: self.empty_slots_focus(),
 		});
 		match scope {
 			ChangeScope::Order => {
@@ -1636,7 +1684,7 @@ mod tests {
 	use crate::action::MenuKind;
 	use crate::config::ConfigKey;
 	use crate::focus::Direction;
-	use crate::view::PaneId;
+	use crate::view::{GridExtent, PaneId};
 
 	struct AcceptAll;
 
@@ -1753,6 +1801,13 @@ mod tests {
 		}
 	}
 
+	fn focused_path(engine: &Engine) -> Option<PathBuf> {
+		engine
+			.focus()
+			.and_then(|id| engine.item(id))
+			.map(|item| item.path.clone())
+	}
+
 	#[test]
 	fn two_engines_run_in_one_process() {
 		let first = temp_folder("first");
@@ -1811,6 +1866,42 @@ mod tests {
 		engine.dispatch(Command::SelectOnly(id)).unwrap();
 		engine.dispatch(Command::Reload).unwrap();
 		assert!(engine.selection().unwrap().contains(id));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn going_up_focuses_the_folder_that_was_left() {
+		let path = temp_folder("up-focus");
+		let child = path.join("child");
+		std::fs::create_dir_all(&child).unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		engine
+			.dispatch(Command::Navigate(crate::navigation::NavigationRequest {
+				pane: PaneId(0),
+				target: child.clone(),
+				record_history: true,
+			}))
+			.unwrap();
+		engine.dispatch(Command::GoUp).unwrap();
+		assert_eq!(focused_path(&engine), Some(child));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn a_jump_to_an_ancestor_focuses_the_child_leading_to_it() {
+		let path = temp_folder("ancestor-focus");
+		let middle = path.join("middle");
+		let leaf = middle.join("leaf");
+		std::fs::create_dir_all(&leaf).unwrap();
+		let mut engine = Engine::open(&leaf).unwrap();
+		engine
+			.dispatch(Command::Navigate(crate::navigation::NavigationRequest {
+				pane: PaneId(0),
+				target: path.clone(),
+				record_history: true,
+			}))
+			.unwrap();
+		assert_eq!(focused_path(&engine), Some(middle));
 		std::fs::remove_dir_all(path).unwrap();
 	}
 
@@ -1931,6 +2022,268 @@ mod tests {
 			.dispatch(Command::Focus(FocusCommand::Move(Direction::Right)))
 			.unwrap();
 		assert_eq!(engine.focus_state().cursor(), Some((2, 1)));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn free_placement_rounds_the_board_up_to_whole_screens() {
+		let path = temp_folder("free-screens");
+		let mut engine = Engine::open(&path).unwrap();
+		for (key, value) in [
+			(ConfigKey::GridMode, ConfigValue::Str(String::from("LINES"))),
+			(ConfigKey::Lines, ConfigValue::Int(2)),
+			(
+				ConfigKey::ScrollDirection,
+				ConfigValue::Str(String::from("HORIZONTAL")),
+			),
+			(ConfigKey::Sort, ConfigValue::Str(String::from("FREE"))),
+		] {
+			engine.dispatch(Command::SetConfig { key, value }).unwrap();
+		}
+		let extent = |engine: &Engine| match engine.view(request()) {
+			ViewSpec::Folder(view) => view.grid_extent,
+			ViewSpec::File(_) => panic!("expected a folder view"),
+		};
+		assert_eq!(
+			extent(&engine),
+			GridExtent {
+				columns: 3,
+				rows: 2
+			}
+		);
+
+		// Six items fill the first screen exactly, so a second empty screen
+		// is added.
+		for index in 0..6 {
+			std::fs::write(path.join(format!("f{index}")), b"x").unwrap();
+		}
+		engine.dispatch(Command::Reload).unwrap();
+		// `Reload` rereads the folder's own config, so put the test config
+		// back before asking for the view again.
+		for (key, value) in [
+			(ConfigKey::GridMode, ConfigValue::Str(String::from("LINES"))),
+			(ConfigKey::Lines, ConfigValue::Int(2)),
+			(
+				ConfigKey::ScrollDirection,
+				ConfigValue::Str(String::from("HORIZONTAL")),
+			),
+			(ConfigKey::Sort, ConfigValue::Str(String::from("FREE"))),
+		] {
+			engine.dispatch(Command::SetConfig { key, value }).unwrap();
+		}
+		assert_eq!(
+			extent(&engine),
+			GridExtent {
+				columns: 6,
+				rows: 2
+			}
+		);
+
+		// The extra screen is reachable: the cursor can move off the last
+		// occupied column into the empty one even though there is no item.
+		engine
+			.dispatch(Command::SetConfig {
+				key: ConfigKey::FocusEmptySlots,
+				value: ConfigValue::Bool(true),
+			})
+			.unwrap();
+		engine.view(request());
+		engine
+			.dispatch(Command::Focus(FocusCommand::SetCursor {
+				pane: PaneId(0),
+				cursor: Some((2, 0)),
+			}))
+			.unwrap();
+		engine
+			.dispatch(Command::Focus(FocusCommand::Move(Direction::Right)))
+			.unwrap();
+		assert_eq!(engine.focus_state().cursor(), Some((3, 0)));
+		assert!(engine.focus().is_none());
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn free_placement_rounds_a_partly_filled_screen_up() {
+		let path = temp_folder("free-half-screen");
+		for index in 0..15 {
+			std::fs::write(path.join(format!("f{index}")), b"x").unwrap();
+		}
+		let mut engine = Engine::open(&path).unwrap();
+		for (key, value) in [
+			(ConfigKey::GridMode, ConfigValue::Str(String::from("LINES"))),
+			(ConfigKey::Lines, ConfigValue::Int(2)),
+			(
+				ConfigKey::ScrollDirection,
+				ConfigValue::Str(String::from("HORIZONTAL")),
+			),
+			(ConfigKey::Sort, ConfigValue::Str(String::from("FREE"))),
+		] {
+			engine.dispatch(Command::SetConfig { key, value }).unwrap();
+		}
+		// Two and a half screens of items become three screens: two full
+		// ones and the rounded-up remainder.
+		match engine.view(request()) {
+			ViewSpec::Folder(view) => {
+				assert_eq!(
+					view.grid_extent,
+					GridExtent {
+						columns: 9,
+						rows: 2
+					}
+				)
+			}
+			ViewSpec::File(_) => panic!("expected a folder view"),
+		}
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn a_vertical_free_grid_keeps_its_columns_inside_the_pane() {
+		let path = temp_folder("free-vertical-columns");
+		for index in 0..4 {
+			std::fs::write(path.join(format!("f{index}")), b"x").unwrap();
+		}
+		let mut engine = Engine::open(&path).unwrap();
+		for (key, value) in [
+			(ConfigKey::GridMode, ConfigValue::Str(String::from("LINES"))),
+			(ConfigKey::Lines, ConfigValue::Int(3)),
+			(
+				ConfigKey::ScrollDirection,
+				ConfigValue::Str(String::from("VERTICAL")),
+			),
+			(ConfigKey::Sort, ConfigValue::Str(String::from("FREE"))),
+		] {
+			engine.dispatch(Command::SetConfig { key, value }).unwrap();
+		}
+		// A position saved while the folder had more columns must not widen
+		// the grid: vertical views cannot scroll that axis.
+		engine
+			.dispatch(Command::SetFreePositions {
+				positions: vec![(String::from("f0"), 5, 0)],
+			})
+			.unwrap();
+		match engine.view(request()) {
+			ViewSpec::Folder(view) => {
+				assert_eq!(view.grid_extent.columns, 3);
+				assert!(
+					view.slots.iter().all(|slot| slot.cell.0 < 3),
+					"a slot escaped the visible columns: {:?}",
+					view.slots.iter().map(|slot| slot.cell).collect::<Vec<_>>()
+				);
+			}
+			ViewSpec::File(_) => panic!("expected a folder view"),
+		}
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn horizontal_group_headers_are_rotated() {
+		let path = temp_folder("horizontal-group-headers");
+		for name in ["a-one.txt", "a-two.txt", "b-one.txt"] {
+			std::fs::write(path.join(name), b"x").unwrap();
+		}
+		let mut engine = Engine::open(&path).unwrap();
+		for (key, value) in [
+			(ConfigKey::GridMode, ConfigValue::Str(String::from("LINES"))),
+			(ConfigKey::Lines, ConfigValue::Int(2)),
+			(
+				ConfigKey::ScrollDirection,
+				ConfigValue::Str(String::from("HORIZONTAL")),
+			),
+			(
+				ConfigKey::Sort,
+				ConfigValue::Str(String::from("ALPHABETICAL")),
+			),
+			(ConfigKey::Group, ConfigValue::Str(String::from("LETTERS"))),
+		] {
+			engine.dispatch(Command::SetConfig { key, value }).unwrap();
+		}
+		match engine.view(request()) {
+			ViewSpec::Folder(view) => {
+				assert!(!view.headers.is_empty());
+				assert!(view.headers.iter().all(|header| header.rotated));
+			}
+			ViewSpec::File(_) => panic!("expected a folder view"),
+		}
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn grouped_list_focus_skips_group_headings() {
+		let path = temp_folder("grouped-list-focus");
+		for name in ["a-one.txt", "a-two.txt", "b-one.txt", "b-two.txt"] {
+			std::fs::write(path.join(name), b"x").unwrap();
+		}
+		let mut engine = Engine::open(&path).unwrap();
+		for (key, value) in [
+			(ConfigKey::ViewMode, ConfigValue::Str(String::from("LIST"))),
+			(
+				ConfigKey::Sort,
+				ConfigValue::Str(String::from("ALPHABETICAL")),
+			),
+			(ConfigKey::Group, ConfigValue::Str(String::from("LETTERS"))),
+			(ConfigKey::FocusEmptySlots, ConfigValue::Bool(true)),
+		] {
+			engine.dispatch(Command::SetConfig { key, value }).unwrap();
+		}
+		engine.view(request());
+		engine
+			.dispatch(Command::Focus(FocusCommand::First))
+			.unwrap();
+		assert_eq!(
+			focused_path(&engine),
+			Some(path.join("a-one.txt")),
+			"the first group starts on its first item"
+		);
+		engine
+			.dispatch(Command::Focus(FocusCommand::Move(Direction::Down)))
+			.unwrap();
+		assert_eq!(focused_path(&engine), Some(path.join("a-two.txt")));
+		engine
+			.dispatch(Command::Focus(FocusCommand::Move(Direction::Down)))
+			.unwrap();
+		assert_eq!(
+			focused_path(&engine),
+			Some(path.join("b-one.txt")),
+			"the group heading between the two items is not a focus cell"
+		);
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn a_vertical_grid_uses_exactly_the_lines_columns() {
+		let path = temp_folder("vertical-columns");
+		for index in 0..10 {
+			std::fs::write(path.join(format!("f{index}")), b"x").unwrap();
+		}
+		let mut engine = Engine::open(&path).unwrap();
+		for (key, value) in [
+			(ConfigKey::GridMode, ConfigValue::Str(String::from("LINES"))),
+			(ConfigKey::Lines, ConfigValue::Int(3)),
+			(
+				ConfigKey::ScrollDirection,
+				ConfigValue::Str(String::from("VERTICAL")),
+			),
+		] {
+			engine.dispatch(Command::SetConfig { key, value }).unwrap();
+		}
+		match engine.view(request()) {
+			ViewSpec::Folder(view) => {
+				match &view.mode {
+					FolderMode::Grid(grid) => {
+						assert_eq!(grid.visible.columns, 3);
+						assert_eq!(grid.lines, 3);
+					}
+					FolderMode::List(_) => panic!("expected a grid"),
+				}
+				assert!(
+					view.slots.iter().all(|slot| slot.cell.0 < 3),
+					"a slot escaped the three columns: {:?}",
+					view.slots.iter().map(|slot| slot.cell).collect::<Vec<_>>()
+				);
+			}
+			ViewSpec::File(_) => panic!("expected a folder view"),
+		}
 		std::fs::remove_dir_all(path).unwrap();
 	}
 
