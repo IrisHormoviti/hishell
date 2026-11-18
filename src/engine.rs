@@ -426,6 +426,7 @@ impl Engine {
 					focus: FocusSpec {
 						pane: self.focus.pane(),
 						item: self.focus.item(),
+						cursor: self.focus.cursor(),
 					},
 					interaction,
 				};
@@ -1204,17 +1205,40 @@ impl Engine {
 			.as_ref()
 			.map(|folder| folder.order().to_vec())
 			.unwrap_or_default();
-		self.focus.set_order(self.focus.pane(), order.clone());
+		let pane = self.focus.pane();
+		let (columns, horizontal, grid_columns, grid_rows) = self.focus_grid(&order);
+		self.focus.apply(FocusCommand::SetOrder {
+			pane,
+			order: order.clone(),
+			columns,
+			horizontal,
+		});
 		// Grouped and stashed views do not fill a plain row-major grid: their
 		// slot cells can jump columns and rows. Register the cells the view
 		// actually laid out so Left/Right/Up/Down follow the picture instead
 		// of a naive `lines`-wide grid.
 		if let Some(positions) = self.view_positions(&order) {
+			self.focus
+				.apply(FocusCommand::SetPositions { pane, positions });
+		} else {
+			// A stale view must not leave the previous folder's cells behind:
+			// movement falls back to the grid until the new view is built.
 			self.focus.apply(FocusCommand::SetPositions {
-				pane: self.focus.pane(),
-				positions,
+				pane,
+				positions: Vec::new(),
 			});
 		}
+		// Empty slots are only navigable inside the laid-out grid, and only
+		// when the folder asks for it.
+		self.focus.apply(FocusCommand::SetGrid {
+			pane,
+			columns: grid_columns,
+			rows: grid_rows,
+		});
+		self.focus.apply(FocusCommand::SetEmptySlots {
+			pane,
+			enabled: self.config.focus_empty_slots,
+		});
 		match command {
 			FocusCommand::First => {
 				self.focus.first(&order);
@@ -1223,7 +1247,6 @@ impl Engine {
 				self.focus.last(&order);
 			}
 			FocusCommand::Move(direction) => {
-				self.focus.set_columns(self.focus_columns());
 				self.focus.move_focus(direction, &order);
 			}
 			FocusCommand::Set { pane, path } => {
@@ -1268,30 +1291,49 @@ impl Engine {
 	fn view_positions(&self, order: &[ItemId]) -> Option<Vec<(i32, i32)>> {
 		let last_view = self.last_view.borrow();
 		let view = last_view.as_ref()?;
+		// Every focus step asks for this on a view that can hold hundreds of
+		// slots, so the cells are indexed once instead of searched per item.
+		let cells: HashMap<ItemId, (i32, i32)> = view
+			.slots
+			.iter()
+			.map(|slot| (slot.item, (slot.cell.0 as i32, slot.cell.1 as i32)))
+			.collect();
 		let mut positions = Vec::with_capacity(order.len());
 		for item in order {
-			let slot = view.slots.iter().find(|slot| slot.item == *item)?;
-			positions.push((slot.cell.0 as i32, slot.cell.1 as i32));
+			positions.push(*cells.get(item)?);
 		}
 		(!positions.is_empty()).then_some(positions)
 	}
 
-	fn focus_columns(&self) -> usize {
+	/// The stride and the full cell grid the focus moves through.
+	///
+	/// The stride is the row count in a horizontal view and the column count
+	/// in a vertical one, which is why both pass `lines`: the index order is
+	/// column-major for the former and row-major for the latter. The grid is
+	/// the slots' extent, grown to the configured lines so an empty trailing
+	/// cell stays reachable.
+	fn focus_grid(&self, order: &[ItemId]) -> (usize, bool, i32, i32) {
 		let last_view = self.last_view.borrow();
 		let Some(view) = last_view.as_ref() else {
-			return 1;
+			return (1, false, 1, 1);
 		};
-		match &view.mode {
-			FolderMode::Grid(grid) => {
-				if grid.horizontal {
-					let items = self.folder.as_ref().map(Folder::len).unwrap_or(0);
-					items.div_ceil(grid.lines.max(1) as usize).max(1)
-				} else {
-					grid.lines.max(1) as usize
-				}
-			}
-			FolderMode::List(_) => 1,
+		let FolderMode::Grid(grid) = &view.mode else {
+			return (1, false, 1, order.len().max(1) as i32);
+		};
+		let lines = grid.lines.max(1) as i32;
+		let items = order.len() as i32;
+		let mut max_column = 0;
+		let mut max_row = 0;
+		for slot in &view.slots {
+			max_column = max_column.max(slot.cell.0 as i32);
+			max_row = max_row.max(slot.cell.1 as i32);
 		}
+		let (columns, rows) = if grid.horizontal {
+			(max_column.max((items + lines - 1) / lines - 1) + 1, lines)
+		} else {
+			(lines, max_row.max((items + lines - 1) / lines - 1) + 1)
+		};
+		(lines as usize, grid.horizontal, columns.max(1), rows.max(1))
 	}
 
 	/// Whether the current folder's `[Radio]` group accepts `path` as a choice.
@@ -1400,6 +1442,13 @@ impl Engine {
 	}
 
 	fn apply_config_change(&mut self, scope: ChangeScope) -> FolderDelta {
+		// The empty-slot focus follows the config immediately; the next focus
+		// move re-registers the grid for the new layout.
+		let pane = self.focus.pane();
+		self.focus.apply(FocusCommand::SetEmptySlots {
+			pane,
+			enabled: self.config.focus_empty_slots,
+		});
 		match scope {
 			ChangeScope::Order => {
 				if let Some(folder) = self.folder.as_mut() {
@@ -1826,6 +1875,62 @@ mod tests {
 			},
 			ViewSpec::File(_) => panic!("expected a folder view"),
 		}
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn empty_focus_walks_the_laid_out_horizontal_grid() {
+		let path = temp_folder("empty-focus");
+		for index in 0..5 {
+			std::fs::write(path.join(format!("f{index}")), b"x").unwrap();
+		}
+		let mut engine = Engine::open(&path).unwrap();
+		for (key, value) in [
+			(ConfigKey::GridMode, ConfigValue::Str(String::from("LINES"))),
+			(ConfigKey::Lines, ConfigValue::Int(2)),
+			(
+				ConfigKey::ScrollDirection,
+				ConfigValue::Str(String::from("HORIZONTAL")),
+			),
+			(ConfigKey::Sort, ConfigValue::Str(String::from("FREE"))),
+			(ConfigKey::FocusEmptySlots, ConfigValue::Bool(true)),
+		] {
+			engine.dispatch(Command::SetConfig { key, value }).unwrap();
+		}
+		engine.view(request());
+		engine
+			.dispatch(Command::Focus(FocusCommand::First))
+			.unwrap();
+		assert_eq!(engine.focus_state().cursor(), Some((0, 0)));
+		// Two rows, so Right is the next column and Down is the next row.
+		engine
+			.dispatch(Command::Focus(FocusCommand::Move(Direction::Right)))
+			.unwrap();
+		assert_eq!(engine.focus_state().cursor(), Some((1, 0)));
+		engine
+			.dispatch(Command::Focus(FocusCommand::Move(Direction::Down)))
+			.unwrap();
+		assert_eq!(engine.focus_state().cursor(), Some((1, 1)));
+		// The last row has a gap after the fifth item: the cursor can rest
+		// there, and one press left remembers the item it came from.
+		engine
+			.dispatch(Command::Focus(FocusCommand::Move(Direction::Right)))
+			.unwrap();
+		assert_eq!(engine.focus_state().cursor(), Some((2, 1)));
+		assert!(engine.focus().is_none());
+		engine
+			.dispatch(Command::Focus(FocusCommand::Move(Direction::Left)))
+			.unwrap();
+		assert_eq!(engine.focus_state().cursor(), Some((1, 1)));
+		assert!(engine.focus().is_some());
+		// Right from the last column must not invent a further one.
+		engine
+			.dispatch(Command::Focus(FocusCommand::Move(Direction::Right)))
+			.unwrap();
+		engine
+			.dispatch(Command::Focus(FocusCommand::Move(Direction::Right)))
+			.unwrap();
+		assert_eq!(engine.focus_state().cursor(), Some((2, 1)));
 		std::fs::remove_dir_all(path).unwrap();
 	}
 

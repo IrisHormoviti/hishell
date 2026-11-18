@@ -294,13 +294,13 @@ impl Squashfs {
 			9 => {
 				let body = self.read_metadata(loc, body_offset, 40)?;
 				let file_size = u64_at(&body, 8)?;
-				let frag_index = u32_at(&body, 24)?;
+				let frag_index = u32_at(&body, 28)?;
 				let count = block_count(file_size, frag_index, self.block_size)?;
 				Some(Inode::File {
 					blocks_start: u64_at(&body, 0)?,
 					file_size,
 					frag_index,
-					frag_offset: u32_at(&body, 28)?,
+					frag_offset: u32_at(&body, 32)?,
 					block_sizes: self.read_block_sizes(loc, body_offset + 40, count)?,
 				})
 			}

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
-use crate::item::{FsKind, Item};
+use crate::item::{FsKind, Item, ItemId};
 use crate::view::GroupMode;
 
 const UNTITLED_RANK: i64 = 1_000_000;
@@ -13,7 +13,8 @@ const STASH_RANK: i64 = 1_000_001;
 
 /// Put sorted items into their display groups. Grouping only moves whole blocks
 /// of items around; the sort inside a group is the order the folder already
-/// chose. Free placement owns its cells, so it is never grouped.
+/// chose, except in custom groups, where the order of the files in the config
+/// wins. Free placement owns its cells, so it is never grouped.
 pub fn assign(items: &mut [Item], config: &Config) {
 	for item in items.iter_mut() {
 		item.group = 0;
@@ -34,26 +35,30 @@ pub fn assign(items: &mut [Item], config: &Config) {
 		.iter()
 		.map(|group| group.name.clone())
 		.collect();
-	let mut file_groups: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+	let mut file_groups: std::collections::HashMap<&str, (usize, usize)> =
+		std::collections::HashMap::new();
 	for (index, group) in config.groups.iter().enumerate() {
-		for file in &group.files {
-			file_groups.insert(file.as_str(), index);
+		for (position, file) in group.files.iter().enumerate() {
+			file_groups.insert(file.as_str(), (index, position));
 		}
 	}
 
 	let mut keyed: Vec<((i64, String), usize)> = Vec::with_capacity(items.len());
+	let mut places: std::collections::HashMap<ItemId, usize> =
+		std::collections::HashMap::with_capacity(items.len());
 	for (index, item) in items.iter().enumerate() {
-		let key = if stash_active && config.stash_dotfiles && item.is_stashed {
-			(STASH_RANK, String::from("Stash"))
+		let (key, place) = if stash_active && config.stash_dotfiles && item.is_stashed {
+			((STASH_RANK, String::from("Stash")), usize::MAX)
 		} else {
 			match config.group_mode {
-				GroupMode::Date => date_group_key(item.modified, now.as_ref()),
-				GroupMode::Letters => letter_group_key(item),
-				GroupMode::Type => type_group_key(item),
+				GroupMode::Date => (date_group_key(item.modified, now.as_ref()), usize::MAX),
+				GroupMode::Letters => (letter_group_key(item), usize::MAX),
+				GroupMode::Type => (type_group_key(item), usize::MAX),
 				GroupMode::Custom => custom_group_key(item, &mut custom_names, &file_groups),
-				GroupMode::None => (0, String::new()),
+				GroupMode::None => ((0, String::new()), usize::MAX),
 			}
 		};
+		places.insert(item.id, place);
 		keyed.push((key, index));
 	}
 
@@ -75,27 +80,34 @@ pub fn assign(items: &mut [Item], config: &Config) {
 			items[item_index].group_label = key.1;
 		}
 	}
-	items.sort_by_key(|item| item.group);
+	items.sort_by_key(|item| {
+		(
+			item.group,
+			places.get(&item.id).copied().unwrap_or(usize::MAX),
+		)
+	});
 }
 
 fn custom_group_key(
 	item: &Item,
 	names: &mut Vec<String>,
-	file_groups: &std::collections::HashMap<&str, usize>,
-) -> (i64, String) {
+	file_groups: &std::collections::HashMap<&str, (usize, usize)>,
+) -> ((i64, String), usize) {
 	let explicit = item.custom_group.trim();
+	let listed = file_groups
+		.get(item.name.as_str())
+		.or_else(|| file_groups.get(item.title.as_str()))
+		.copied();
 	let name = if !explicit.is_empty() {
 		explicit.to_string()
 	} else {
-		file_groups
-			.get(item.name.as_str())
-			.or_else(|| file_groups.get(item.title.as_str()))
-			.and_then(|index| names.get(*index))
+		listed
+			.and_then(|(index, _)| names.get(index))
 			.cloned()
 			.unwrap_or_default()
 	};
 	if name.is_empty() {
-		return (UNTITLED_RANK, String::new());
+		return ((UNTITLED_RANK, String::new()), usize::MAX);
 	}
 	let rank = match names.iter().position(|known| known == &name) {
 		Some(position) => position as i64,
@@ -104,7 +116,11 @@ fn custom_group_key(
 			(names.len() - 1) as i64
 		}
 	};
-	(rank, name)
+	let place = listed
+		.filter(|(index, _)| names.get(*index) == Some(&name))
+		.map(|(_, position)| position)
+		.unwrap_or(usize::MAX);
+	((rank, name), place)
 }
 
 fn letter_group_key(item: &Item) -> (i64, String) {
@@ -334,5 +350,30 @@ mod tests {
 		assign(&mut items, &config);
 		let labels: Vec<&str> = items.iter().map(|item| item.group_label.as_str()).collect();
 		assert_eq!(labels, ["Folders", "Images", "Archives"]);
+	}
+
+	#[test]
+	fn custom_groups_follow_config_order_and_ignore_the_sort_mode() {
+		let mut items = vec![item("a.png"), item("b.png"), item("c.png")];
+		let config = Config {
+			group_mode: GroupMode::Custom,
+			sort: crate::view::SortKey::Alphabetical,
+			groups: vec![
+				crate::view::CustomGroup {
+					name: String::from("First"),
+					files: vec![String::from("c.png"), String::from("a.png")],
+				},
+				crate::view::CustomGroup {
+					name: String::from("Second"),
+					files: vec![String::from("b.png")],
+				},
+			],
+			..Config::default()
+		};
+		assign(&mut items, &config);
+		let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
+		assert_eq!(names, ["c.png", "a.png", "b.png"]);
+		let labels: Vec<&str> = items.iter().map(|item| item.group_label.as_str()).collect();
+		assert_eq!(labels, ["First", "First", "Second"]);
 	}
 }

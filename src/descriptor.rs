@@ -4,11 +4,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::config_parser::{ConfigParser, ConfigValue};
 
 const REFRESH: Duration = Duration::from_secs(10);
+
+/// Even when no descriptor root grew or shrank, re-read them this often: a file
+/// rewritten in place does not move its directory's stamp.
+const HARD_REFRESH: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Descriptor {
@@ -52,20 +56,63 @@ impl Descriptor {
 	}
 }
 
-static CACHE: LazyLock<Mutex<Option<(Instant, HashMap<PathBuf, Descriptor>)>>> =
-	LazyLock::new(|| Mutex::new(None));
+struct Cache {
+	built: Instant,
+	/// When `entries` was last read in full.
+	built_entries: Instant,
+	/// When each descriptor root last changed. A timed refresh compares these
+	/// instead of re-reading every entry.
+	stamps: Vec<(PathBuf, Option<SystemTime>)>,
+	entries: HashMap<PathBuf, Descriptor>,
+}
+
+static CACHE: LazyLock<Mutex<Option<Cache>>> = LazyLock::new(|| Mutex::new(None));
 
 /// The descriptor that describes `path`, if any.
 pub fn lookup(path: &Path) -> Option<Descriptor> {
-	let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 	let mut cache = CACHE.lock().unwrap();
 	let stale = cache
 		.as_ref()
-		.is_none_or(|(built, _)| built.elapsed() >= REFRESH);
+		.is_none_or(|cache| cache.built.elapsed() >= REFRESH);
 	if stale {
-		*cache = Some((Instant::now(), build()));
+		let stamps = root_stamps();
+		let now = Instant::now();
+		match cache.as_mut() {
+			Some(current)
+				if current.stamps == stamps && current.built_entries.elapsed() < HARD_REFRESH =>
+			{
+				current.built = now;
+			}
+			_ => {
+				*cache = Some(Cache {
+					built: now,
+					built_entries: now,
+					stamps,
+					entries: build(),
+				})
+			}
+		}
 	}
-	cache.as_ref()?.1.get(&key).cloned()
+	let cache = cache.as_ref()?;
+	// A scan looks up the same paths a directory listing just produced, which
+	// are already canonical. Only pay for `realpath` when that misses.
+	if let Some(found) = cache.entries.get(path) {
+		return Some(found.clone());
+	}
+	let key = path.canonicalize().ok()?;
+	cache.entries.get(&key).cloned()
+}
+
+fn root_stamps() -> Vec<(PathBuf, Option<SystemTime>)> {
+	roots()
+		.into_iter()
+		.map(|root| {
+			let stamp = std::fs::metadata(&root)
+				.and_then(|metadata| metadata.modified())
+				.ok();
+			(root, stamp)
+		})
+		.collect()
 }
 
 fn build() -> HashMap<PathBuf, Descriptor> {

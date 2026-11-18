@@ -198,7 +198,7 @@ impl Jobs {
 		for index in 0..workers.max(1) {
 			let jobs = job_rx.clone();
 			let events = event_tx.clone();
-			let handle = std::thread::Builder::new()
+			if let Ok(handle) = std::thread::Builder::new()
 				.name(format!("hishell-job-{index}"))
 				.spawn(move || {
 					while let Ok(job) = jobs.recv() {
@@ -226,9 +226,9 @@ impl Jobs {
 							});
 						}
 					}
-				})
-				.expect("spawn job worker");
-			handles.push(handle);
+				}) {
+				handles.push(handle);
+			}
 		}
 
 		Self {

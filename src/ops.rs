@@ -149,7 +149,9 @@ impl Op {
 		match self {
 			Self::Rename { path, .. } => vec![path.clone()],
 			Self::Move { sources, .. } => sources.clone(),
-			Self::Delete { paths } | Self::Trash { paths } | Self::Destroy { paths } => paths.clone(),
+			Self::Delete { paths } | Self::Trash { paths } | Self::Destroy { paths } => {
+				paths.clone()
+			}
 			Self::Paste { snapshot, .. } if snapshot.cut => snapshot.paths.clone(),
 			_ => Vec::new(),
 		}

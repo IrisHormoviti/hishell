@@ -26,10 +26,6 @@ fn list_layout(config: &Config, request: &ViewRequest, items: &[Item]) -> Folder
 	let height = request.metrics.label_height.max(16.0) + 12.0;
 	let mut result = FolderLayout::default();
 
-	if config.sort == crate::view::SortKey::Free {
-		return result;
-	}
-
 	let grouped = config.group_mode != crate::view::GroupMode::None || config.show_stash;
 	if !grouped {
 		result.slots = items

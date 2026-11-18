@@ -1,20 +1,17 @@
 //! Descriptor generators: external programs that describe a file the way a
 //! directory descriptor does, discovered by content type like a thumbnailer.
 //!
-//! A directory descriptor is a small desktop entry that names a directory and
-//! gives it a `Name` and `Icon` (see [`crate::directory_descriptor`]). Some
-//! files can describe themselves just as well — a DS ROM carries its own title
-//! and icon — but the shell must not know how each format stores them. A
-//! *descriptor generator* is the missing piece: a definition installed under
-//! `hishell/descriptor-generators` in the XDG data directories, matched
-//! against the file's content type exactly like a freedesktop thumbnailer:
+//! Some files carry their own title and icon, but the shell must not know how
+//! each format stores them. A generator is a definition installed under
+//! `hishell/descriptor-generators` in the XDG data directories, matched against
+//! the file's content type exactly like a freedesktop thumbnailer:
 //!
 //! ```ini
 //! [Descriptor Generator Entry]
-//! TryExec=nds-descriptor
-//! Exec=nds-descriptor %i %o
-//! MimeType=application/vnd.nintendo.nitro.rom;
-//! Icon=application-x-nintendo-ds-rom
+//! TryExec=text-descriptor
+//! Exec=text-descriptor %i %o
+//! MimeType=text/plain;
+//! Icon=text-x-generic
 //! ```
 //!
 //! `Icon` is optional: it names the themed placeholder the file view shows
@@ -23,26 +20,24 @@
 //!
 //! `%i` is the file, `%o` the desktop entry the generator must write. The
 //! generated entry uses the same `Type=File`/`Path=` form as a directory
-//! descriptor, so [`crate::directory_descriptor`] reads it with no format of
-//! its own:
+//! descriptor, so [`crate::descriptor`] reads it with no format of its own:
 //!
 //! ```ini
 //! [Desktop Entry]
 //! Type=File
-//! Path=/roms/Game.nds
-//! Name=Game
-//! Comment=Nintendo DS ROM · USA · ABCE
-//! Icon=/home/root/.cache/hishell/descriptors/<hash>.svg
+//! Path=/home/user/notes.txt
+//! Name=notes
+//! Comment=Plain text
+//! Icon=/home/user/.cache/hishell/descriptors/<hash>.svg
 //! ```
 //!
 //! Generated entries are cached under `$XDG_CACHE_HOME/hishell/descriptors`;
 //! a `.stamp` beside each one records the source's modification time and size,
 //! so a changed file is regenerated and an unchanged folder costs only a stat.
-//! The work runs on the same kind of background workers as thumbnails: a folder
-//! scan queues the files whose descriptor is missing, and the views pick the
-//! finished titles and icons up on their next poll. A generator that hangs is
-//! killed, and a generator that fails leaves the file's ordinary name and MIME
-//! icon in place.
+//! The work runs on the same kind of background workers as thumbnails: a scan
+//! queues the files whose descriptor is missing, and views pick the results up
+//! on their next poll. A generator that hangs is killed, and one that fails
+//! leaves the file's ordinary name and MIME icon in place.
 
 use crate::entry::Entry;
 use crate::item::{FsKind, IconRef};
@@ -50,7 +45,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -134,6 +129,9 @@ static GENERATORS: OnceLock<Vec<Generator>> = OnceLock::new();
 /// keep the view repainting long after the descriptors are in place.
 static RESULTS_EPOCH: AtomicU64 = AtomicU64::new(0);
 
+/// Generation is held back until the session calls `activate`; see `defer`.
+static DEFERRED: AtomicBool = AtomicBool::new(false);
+
 /// The current result epoch. Callers remember it and skip work when unchanged.
 pub fn results_epoch() -> u64 {
 	RESULTS_EPOCH.load(Ordering::Relaxed)
@@ -160,7 +158,7 @@ fn state() -> &'static State {
 /// `$XDG_DATA_DIRS`, which the launcher sets to the bundle's share directory
 /// ahead of `/usr/share`. The `dirs` crate only exposes the singular data
 /// directory, so the user's own data directory is added separately.
-fn data_dirs() -> Vec<PathBuf> {
+pub(crate) fn data_dirs() -> Vec<PathBuf> {
 	let mut dirs = Vec::new();
 	if let Some(dir) = dirs::data_dir() {
 		dirs.push(dir);
@@ -182,7 +180,7 @@ fn generator_dirs() -> Vec<PathBuf> {
 }
 
 /// The generated-descriptor cache. It is also a descriptor root in
-/// [`crate::directory_descriptor`], so a cached entry needs no special lookup.
+/// [`crate::descriptor`], so a cached entry needs no special lookup.
 pub fn cache_root() -> PathBuf {
 	dirs::cache_dir()
 		.unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -190,7 +188,7 @@ pub fn cache_root() -> PathBuf {
 		.join("descriptors")
 }
 
-fn command_available(name: &str) -> bool {
+pub(crate) fn command_available(name: &str) -> bool {
 	if name.contains('/') {
 		return Path::new(name).is_file();
 	}
@@ -569,6 +567,12 @@ pub(crate) fn topscreen_icon_art(entry: &Path) -> Option<PathBuf> {
 fn next_job(st: &'static State) -> Job {
 	let mut pending = st.pending.lock().unwrap();
 	loop {
+		// The session holds generation back until its first frame is on
+		// screen, so a folder of ROMs does not spawn a process per item while
+		// the shell is still drawing its first screen.
+		while DEFERRED.load(Ordering::Relaxed) {
+			pending = st.cond.wait(pending).unwrap();
+		}
 		while let Some(job) = pending.queue.pop_front() {
 			pending.queued.remove(&job.key);
 			if let Some(count) = pending.folder_counts.get_mut(&job.folder) {
@@ -671,23 +675,27 @@ pub fn placeholder_icon_mime(mime: &str) -> Option<String> {
 /// one is missing or stale the job is queued. Called for every file in a folder
 /// scan, so it must stay cheap when everything is already cached.
 pub fn request(src: &Path, folder: &Path) {
-	// The generator lookup is a cached table read, while the checks below are
-	// FUSE round-trips. Decide whether this file needs one before touching it,
-	// so a folder of plain entries (`.desktop`, ROMs without a generator) does
-	// not pay for two stats each.
 	let mime = mime_for(src);
-	let Some(generator) = generator_for(&mime) else {
-		return;
-	};
-	if !src.is_file() || cached(src).is_some() {
-		return;
+	request_with_mime(src, folder, &mime);
+}
+
+/// `request`, for a scan that already resolved the file's MIME type. It returns
+/// the generated entry when one is already cached, so the caller does not have
+/// to open and parse it a second time.
+pub fn request_with_mime(src: &Path, folder: &Path, mime: &str) -> Option<PathBuf> {
+	let generator = generator_for(mime)?;
+	if !src.is_file() {
+		return None;
+	}
+	if let Some(cached) = cached(src) {
+		return Some(cached);
 	}
 
 	let key = cache_path(src);
 	let st = state();
 	let mut pending = st.pending.lock().unwrap();
 	if pending.queued.contains(&key) {
-		return;
+		return None;
 	}
 	if pending.folder_counts.get(folder).copied().unwrap_or(0) >= MAX_PENDING_PER_FOLDER {
 		drop_oldest_for_folder(&mut pending, folder);
@@ -703,11 +711,24 @@ pub fn request(src: &Path, folder: &Path) {
 		src: src.to_path_buf(),
 		key,
 		folder: folder.to_path_buf(),
-		mime,
+		mime: mime.to_string(),
 		exec: generator.exec,
 		epoch,
 	});
 	st.cond.notify_one();
+	None
+}
+
+/// Hold generation back until `activate`: the work stays queued.
+pub fn defer() {
+	DEFERRED.store(true, Ordering::Relaxed);
+}
+
+/// Let a deferred session start generating the queued descriptors.
+pub fn activate() {
+	if DEFERRED.swap(false, Ordering::Relaxed) {
+		state().cond.notify_all();
+	}
 }
 
 /// Drop queued work for a folder the view has left.

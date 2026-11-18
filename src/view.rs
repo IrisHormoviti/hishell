@@ -442,6 +442,10 @@ pub struct PaneId(pub u32);
 pub struct FocusSpec {
 	pub pane: PaneId,
 	pub item: Option<ItemId>,
+	/// The cell the cursor occupies. Unlike `item` it is also present when
+	/// empty slots can take the focus, which is how a frontend draws the
+	/// brackets around an empty cell.
+	pub cursor: Option<(i32, i32)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -555,11 +559,12 @@ pub fn grid_spec(config: &Config, request: &ViewRequest) -> GridSpec {
 		GridSizing::FixedLines { lines } => {
 			let lines = lines as f64;
 			let cell = (main / lines - gap).min(main / 2.0 - gap);
-			// Labels below the icon take two lines, so leave them room by
-			// trimming the derived icon a little.
-			let label_trim = if config.show_labels && !beside {
-				// Two lines of labels sit below the icon; take that space out
-				// of the icon so the cell does not grow taller than the panel.
+			// Labels below the icon take two lines. In a vertical view the
+			// label sits under the icon on the scrolling axis, so trim the
+			// icon to keep the row compact. In a horizontal view the label
+			// space is already part of `padding`; trimming it again leaves
+			// only a sliver of icon.
+			let label_trim = if config.show_labels && !beside && !horizontal {
 				labels.height
 			} else {
 				0.0
@@ -689,6 +694,31 @@ mod tests {
 			.unwrap();
 		let spec = grid_spec(&config, &request(1280.0, 720.0));
 		assert!(spec.lines > 8, "wide views need more than eight columns");
+	}
+
+	#[test]
+	fn horizontal_labels_below_keep_the_icon_readable() {
+		let mut config = Config::default();
+		config
+			.set(
+				ConfigKey::ScrollDirection,
+				ConfigValue::Str("HORIZONTAL".into()),
+			)
+			.unwrap();
+		config
+			.set(ConfigKey::ShowLabels, ConfigValue::Bool(true))
+			.unwrap();
+		config.set(ConfigKey::Lines, ConfigValue::Int(2)).unwrap();
+		let spec = grid_spec(&config, &request(400.0, 300.0));
+		assert!(
+			spec.icon_size >= 100.0,
+			"the label space is already in the cell; icon {} is too small",
+			spec.icon_size
+		);
+		assert!(
+			(spec.cell.height - (spec.icon_size + spec.labels.height)).abs() < 1.0,
+			"a labelled horizontal cell is the icon plus one label height"
+		);
 	}
 
 	#[test]

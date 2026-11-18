@@ -266,14 +266,43 @@ mod tests {
 	}
 
 	#[test]
-	fn reads_a_real_appimage() {
-		let path = Path::new("/home/iris/Applications/aseprite.appimage");
-		if !path.exists() {
+	fn reads_an_appimage_from_its_own_squashfs() {
+		let Some(root) = build_appimage() else {
 			return;
-		}
-		let entry = entry(path).expect("embedded entry");
-		assert_eq!(entry.name.as_deref(), Some("Aseprite"));
-		assert!(entry.icon.is_some());
+		};
+		let image = root.join("fixture.AppImage");
+		let embedded = extract_entry(&image).expect("embedded entry");
+		assert_eq!(embedded.name.as_deref(), Some("Fixture"));
+		assert_eq!(embedded.comment.as_deref(), Some("A test image"));
+		assert_eq!(embedded.icon.as_deref(), Some("fixture"));
+		let _ = std::fs::remove_dir_all(&root);
+	}
+
+	/// A throwaway AppImage: one desktop entry and its icon in a squashfs.
+	/// Returns the directory holding it, or `None` without `mksquashfs`.
+	fn build_appimage() -> Option<PathBuf> {
+		let root = std::env::temp_dir().join(format!("hishell-appimage-{}", std::process::id()));
+		let tree = root.join("SquashFS-root");
+		let _ = std::fs::remove_dir_all(&root);
+		std::fs::create_dir_all(&tree).ok()?;
+		std::fs::write(
+			tree.join("fixture.desktop"),
+			"[Desktop Entry]\nType=Application\nName=Fixture\nComment=A test image\nIcon=fixture\n",
+		)
+		.ok()?;
+		std::fs::write(
+			tree.join(".DirIcon"),
+			"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>",
+		)
+		.ok()?;
+		let image = root.join("fixture.AppImage");
+		let status = std::process::Command::new("mksquashfs")
+			.arg(&tree)
+			.arg(&image)
+			.args(["-noappend", "-comp", "gzip", "-no-progress", "-quiet"])
+			.status()
+			.ok()?;
+		status.success().then_some(root)
 	}
 
 	#[test]
