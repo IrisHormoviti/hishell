@@ -559,13 +559,14 @@ impl Execution {
 			| Some(EntryType::Toggle)
 			| Some(EntryType::Number)
 			| Some(EntryType::Text)
-			| Some(EntryType::Radio) => file.map(Path::to_path_buf),
+			| Some(EntryType::Radio)
+			| Some(EntryType::Slider) => file.map(Path::to_path_buf),
 			Some(EntryType::File) => Some(
 				file.or(entry.target.as_deref())
 					.unwrap_or(item)
 					.to_path_buf(),
 			),
-			Some(EntryType::Link) | Some(EntryType::Directory) | None => {
+			Some(EntryType::Link) | Some(EntryType::Directory) | Some(EntryType::Info) | None => {
 				return Err(LaunchError::NotExecutable(item.to_path_buf()));
 			}
 		};

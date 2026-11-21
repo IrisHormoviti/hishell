@@ -17,8 +17,10 @@ pub enum EntryType {
 	Button,
 	Toggle,
 	Number,
+	Slider,
 	Text,
 	Radio,
+	Info,
 	File,
 }
 
@@ -31,8 +33,10 @@ impl EntryType {
 			Self::Button => "Button",
 			Self::Toggle => "Toggle",
 			Self::Number => "Number",
+			Self::Slider => "Slider",
 			Self::Text => "Text",
 			Self::Radio => "Radio",
+			Self::Info => "Info",
 			Self::File => "File",
 		}
 	}
@@ -45,8 +49,10 @@ impl EntryType {
 			"button" => Some(Self::Button),
 			"toggle" => Some(Self::Toggle),
 			"number" => Some(Self::Number),
+			"slider" => Some(Self::Slider),
 			"text" => Some(Self::Text),
 			"radio" => Some(Self::Radio),
+			"info" => Some(Self::Info),
 			"file" => Some(Self::File),
 			_ => None,
 		}
@@ -60,8 +66,10 @@ impl EntryType {
 			Self::Button => ItemKind::Button,
 			Self::Toggle => ItemKind::Toggle,
 			Self::Number => ItemKind::Number,
+			Self::Slider => ItemKind::Slider,
 			Self::Text => ItemKind::Text,
 			Self::Radio => ItemKind::Radio,
+			Self::Info => ItemKind::Info,
 			Self::File => ItemKind::File,
 		}
 	}
@@ -94,6 +102,8 @@ pub struct Entry {
 	/// Extra arguments passed to the terminal before the command.
 	pub terminal_options: Option<String>,
 	pub launch_animation: Option<String>,
+	/// `UID`: the name of this app's folder in the save manager.
+	pub uid: Option<String>,
 	/// `[App Display] MainDisplay`: the panel this app's first window goes to.
 	/// 0 is the top panel, 1 the bottom; absent or -1 uses the system default.
 	pub main_display: Option<i32>,
@@ -102,6 +112,7 @@ pub struct Entry {
 	pub toggle: bool,
 	pub number_value: String,
 	pub number_fields: Vec<NumberField>,
+	pub slider: Option<crate::item::Slider>,
 	/// The current value of a `Type=Text` field.
 	pub text_value: String,
 	/// Placeholder shown for an empty `Type=Text` field.
@@ -206,12 +217,14 @@ impl Entry {
 			terminal: value_bool(values.get("Terminal")),
 			terminal_options: string("TerminalOptions").filter(|value| !value.trim().is_empty()),
 			launch_animation: string("LaunchAnimation").filter(|value| !value.trim().is_empty()),
+			uid: string("UID").and_then(save_folder_name),
 			main_display,
 			hidden: value_bool(values.get("Hidden")),
 			no_display: value_bool(values.get("NoDisplay")),
 			toggle: value_bool(values.get("Toggle")),
 			number_value: number_value(values),
 			number_fields: number_fields(values),
+			slider: (entry_type == Some(EntryType::Slider)).then(|| slider(values)),
 			text_value: string("Text").unwrap_or_default(),
 			text_placeholder: string("TextPlaceholder").filter(|value| !value.is_empty()),
 			generated: value_bool(values.get("Generated")),
@@ -248,7 +261,9 @@ impl Entry {
 		let expanded = if values.is_empty() {
 			exec.replace("%v", if self.toggle { "off" } else { "on" })
 		} else {
-			let mut expanded = exec.to_string();
+			// A slider is a single value, so `%v` is its natural field code;
+			// `%1`, `%2`, … remain the numbered fields a number dialog uses.
+			let mut expanded = exec.replace("%v", &values[0].to_string());
 			for (index, value) in values.iter().enumerate() {
 				expanded = expanded.replace(&format!("%{}", index + 1), &value.to_string());
 			}
@@ -370,14 +385,24 @@ impl Entry {
 		self.hook_args(command, None)
 	}
 
-	/// The icon this entry asks for, resolved against the entry file.
+	/// The icon this entry asks for, resolved against the entry file. No `Icon=`
+	/// means the default, `./.icon`.
 	pub fn icon_ref(&self) -> Option<IconRef> {
-		let icon = self.icon.as_deref()?;
+		let explicit = self.icon.as_deref();
+		let icon = explicit.unwrap_or(DEFAULT_ICON);
 		let base = self.path.parent().unwrap_or(Path::new("."));
 		Some(if let Some(rest) = icon.strip_prefix("file://") {
 			IconRef::Path(PathBuf::from(rest))
 		} else if icon.contains('/') || icon.starts_with('.') {
-			IconRef::Path(base.join(icon))
+			let path = base.join(icon);
+			match resolve_icon_file(&path) {
+				Some(path) => IconRef::Path(path),
+				// An explicit `Icon=` is kept even when its file is missing:
+				// the view draws its own fallback for it. The default only
+				// applies when there is something to show.
+				None if explicit.is_some() => IconRef::Path(path),
+				None => return None,
+			}
 		} else {
 			IconRef::Theme(icon.to_string())
 		})
@@ -441,6 +466,23 @@ fn value_int(values: &std::collections::HashMap<String, ConfigValue>, key: &str)
 	}
 }
 
+/// The `SliderValue`/`SliderMin`/`SliderMax` fields a `Type=Slider` provider
+/// writes. The step defaults to one and the value is kept inside the range.
+fn slider(values: &std::collections::HashMap<String, ConfigValue>) -> crate::item::Slider {
+	let min = value_int(values, "SliderMin").unwrap_or(0);
+	let max = value_int(values, "SliderMax").unwrap_or(100).max(min);
+	let step = value_int(values, "SliderStep").unwrap_or(1).max(1);
+	let value = value_int(values, "SliderValue")
+		.unwrap_or(min)
+		.clamp(min, max);
+	crate::item::Slider {
+		value,
+		min,
+		max,
+		step,
+	}
+}
+
 /// The `NumberNLabel`/`NumberNValue`/`NumberNMin`/`NumberNMax` fields a
 /// `Type=Number` provider writes.
 fn number_fields(values: &std::collections::HashMap<String, ConfigValue>) -> Vec<NumberField> {
@@ -486,6 +528,52 @@ fn diagnostic(path: &Path, message: impl Into<String>) -> ConfigDiagnostic {
 		line: None,
 		message: message.into(),
 	}
+}
+
+/// The icon a bundle uses when its entry does not name one.
+pub const DEFAULT_ICON: &str = "./.icon";
+
+/// The extensions an `Icon=` path may leave off, in the order they are tried.
+const ICON_EXTENSIONS: [&str; 7] = ["svg", "png", "svgz", "webp", "avif", "jpg", "jpeg"];
+
+/// The default icon a folder shows when its `.directory` says nothing: the
+/// first `.icon.<extension>` beside it. A folder needs no entry at all.
+pub fn folder_icon_ref(path: &Path) -> Option<IconRef> {
+	resolve_icon_file(&path.join(DEFAULT_ICON)).map(IconRef::Path)
+}
+
+/// Resolve an `Icon=` path that names no file exactly: a path that already
+/// exists is returned as is; a path without an extension finds the matching
+/// file, so `.icon` means `.icon.svg`, `.icon.png`, ... A path that carries its
+/// own extension never gains one.
+pub fn resolve_icon_file(path: &Path) -> Option<PathBuf> {
+	if path.is_file() {
+		return Some(path.to_path_buf());
+	}
+	if path.extension().is_some() {
+		return None;
+	}
+	for extension in ICON_EXTENSIONS {
+		let mut candidate = path.to_path_buf().into_os_string();
+		candidate.push(".");
+		candidate.push(extension);
+		let candidate = PathBuf::from(candidate);
+		if candidate.is_file() {
+			return Some(candidate);
+		}
+	}
+	None
+}
+
+fn save_folder_name(value: String) -> Option<String> {
+	let value = value.trim();
+	(!value.is_empty()
+		&& value != "."
+		&& value != ".."
+		&& !value.contains('/')
+		&& !value.contains('\\')
+		&& !value.contains('\0'))
+	.then(|| value.to_string())
 }
 
 /// Expand a provider command with `%v`, `%n`, `%p`, `%k`, `%c` and `%%`.
@@ -598,6 +686,116 @@ mod tests {
 		assert_eq!(entry.entry_type, Some(EntryType::Application));
 		assert_eq!(entry.exec.as_deref(), Some("ride %f"));
 		assert!(!entry.hidden);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn an_extension_is_tried_in_order() {
+		let root = window("icon-order");
+		std::fs::write(root.join("art.png"), "").unwrap();
+		std::fs::write(root.join("art.svg"), "").unwrap();
+		assert_eq!(
+			resolve_icon_file(&root.join("art")),
+			Some(root.join("art.svg"))
+		);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn avif_is_an_icon_extension() {
+		let root = window("icon-avif");
+		std::fs::write(root.join("art.avif"), "").unwrap();
+		assert_eq!(
+			resolve_icon_file(&root.join("art")),
+			Some(root.join("art.avif"))
+		);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn an_exact_file_keeps_its_extension() {
+		let root = window("icon-exact");
+		std::fs::write(root.join("art.png"), "").unwrap();
+		assert_eq!(
+			resolve_icon_file(&root.join("art.png")),
+			Some(root.join("art.png"))
+		);
+		assert_eq!(resolve_icon_file(&root.join("missing.png")), None);
+		assert_eq!(resolve_icon_file(&root.join("missing")), None);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn an_entry_without_an_icon_finds_dot_icon() {
+		let root = window("icon-default");
+		std::fs::write(root.join(".icon.png"), "").unwrap();
+		std::fs::write(
+			root.join(".directory"),
+			"[Desktop Entry]\nType=Application\nExec=./app\n",
+		)
+		.unwrap();
+		let entry = Entry::read(&root.join(".directory"), FsKind::Directory).unwrap();
+		assert_eq!(entry.icon, None);
+		assert_eq!(
+			entry.icon_ref(),
+			Some(IconRef::Path(root.join(".icon.png")))
+		);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn an_explicit_icon_keeps_its_meaning() {
+		let root = window("icon-explicit");
+		std::fs::write(root.join("art.png"), "").unwrap();
+		let entry_at = |icon: &str| {
+			std::fs::write(
+				root.join(".directory"),
+				format!("[Desktop Entry]\nType=Application\nIcon={icon}\nExec=./app\n"),
+			)
+			.unwrap();
+			Entry::read(&root.join(".directory"), FsKind::Directory)
+				.unwrap()
+				.icon_ref()
+		};
+		assert_eq!(
+			entry_at("folder"),
+			Some(IconRef::Theme(String::from("folder")))
+		);
+		assert_eq!(
+			entry_at("./art"),
+			Some(IconRef::Path(root.join("art.png")))
+		);
+		assert_eq!(
+			entry_at("./art.png"),
+			Some(IconRef::Path(root.join("art.png")))
+		);
+		// Nothing matches: the entry's own path stays, and the renderer's
+		// fallback draws it.
+		assert_eq!(
+			entry_at("./missing"),
+			Some(IconRef::Path(root.join("missing")))
+		);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn a_uid_names_one_save_folder() {
+		let root = window("uid");
+		let path = root.join(".directory");
+		let read = |uid: &str| {
+			std::fs::write(
+				&path,
+				format!("[Desktop Entry]\nType=Application\nUID={uid}\nExec=./app\n"),
+			)
+			.unwrap();
+			Entry::read(&path, FsKind::Directory).unwrap().uid
+		};
+		assert_eq!(read("eu.raidev.coolapp"), Some(String::from("eu.raidev.coolapp")));
+		// A UID is a folder name, never a path.
+		assert_eq!(read("../escape"), None);
+		assert_eq!(read("a/b"), None);
+		assert_eq!(read(".."), None);
+		assert_eq!(read(""), None);
 		std::fs::remove_dir_all(root).unwrap();
 	}
 

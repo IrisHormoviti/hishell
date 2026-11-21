@@ -106,6 +106,12 @@ impl ActionSubjects {
 	pub const RADIO: Self = Self(1 << 11);
 	pub const TEXT: Self = Self(1 << 12);
 	pub const PROGRESS: Self = Self(1 << 13);
+	/// A display-only row. It is deliberately not part of [`Self::ITEMS`], so
+	/// no item action (Open, Copy, Trash, …) is offered for it.
+	pub const INFO: Self = Self(1 << 14);
+	/// An inline slider. It is deliberately not part of [`Self::ITEMS`], so
+	/// no item action (Open, Copy, Trash, …) is offered for it.
+	pub const SLIDER: Self = Self(1 << 15);
 	pub const ITEMS: Self = Self(
 		Self::FOLDER.0
 			| Self::FILE.0

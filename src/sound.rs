@@ -25,6 +25,10 @@ use std::time::{Duration, Instant};
 pub const KEY_PRESS: &str = "button-pressed";
 /// The event a key plays when it is released.
 pub const KEY_RELEASE: &str = "button-released";
+/// A switch was turned on.
+pub const TOGGLE_ON: &str = "button-toggle-on";
+/// A switch was turned off.
+pub const TOGGLE_OFF: &str = "button-toggle-off";
 /// The cursor moved onto another item.
 pub const ITEM_FOCUS: &str = "item-focus";
 /// An item was opened.

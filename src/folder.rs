@@ -169,8 +169,15 @@ impl Folder {
 			let generated = (raw.fs_kind == FsKind::File)
 				.then(|| crate::descriptor_generator::result_for(&raw.path.to_string_lossy()))
 				.flatten();
+			// The default icon is `./.icon` for every entry, so a folder uses
+			// its own `.icon.<extension>` with or without a `.directory`.
 			let icon = entry
 				.and_then(Entry::icon_ref)
+				.or_else(|| {
+					(raw.fs_kind == FsKind::Directory)
+						.then(|| crate::entry::folder_icon_ref(&raw.path))
+						.flatten()
+				})
 				.or_else(|| {
 					descriptor
 						.as_ref()
@@ -244,6 +251,7 @@ impl Folder {
 				mime,
 				icon,
 				model_icon,
+				uid: entry.and_then(|entry| entry.uid.clone()),
 				is_symlink: raw.is_symlink,
 				is_dotfile: name.starts_with('.'),
 				toggle_on: entry.is_some_and(|entry| entry.toggle),
@@ -253,6 +261,7 @@ impl Folder {
 				number_fields: entry
 					.map(|entry| entry.number_fields.clone())
 					.unwrap_or_default(),
+				slider: entry.and_then(|entry| entry.slider),
 				text_value: entry
 					.map(|entry| entry.text_value.clone())
 					.unwrap_or_default(),
@@ -299,6 +308,43 @@ impl Folder {
 
 	pub fn items(&self) -> &[Item] {
 		&self.items
+	}
+
+	/// Update one control's in-memory state without rescanning the folder.
+	///
+	/// A provider control writes its entry on disk, and the folder's revision
+	/// brings the new value back. A toggle is the one control the user sees
+	/// change under the finger, so it must not wait for that round trip; the
+	/// rescan that follows confirms it (or puts it back if the command failed).
+	/// Returns whether the item was found and its value changed.
+	pub fn set_toggle(&mut self, path: &Path, on: bool) -> bool {
+		let Some(item) = self.items.iter_mut().find(|item| item.path == path) else {
+			return false;
+		};
+		if item.toggle_on == on {
+			return false;
+		}
+		item.toggle_on = on;
+		true
+	}
+
+	/// Update a slider's in-memory position without rescanning the folder.
+	///
+	/// The provider writes the value back; the slider still has to follow the
+	/// finger while the drag is in progress. The rescan that follows confirms
+	/// it, or puts the knob back when the command failed.
+	pub fn set_slider(&mut self, path: &Path, value: i64) -> bool {
+		let Some(item) = self.items.iter_mut().find(|item| item.path == path) else {
+			return false;
+		};
+		let Some(slider) = item.slider.as_mut() else {
+			return false;
+		};
+		if slider.value == value {
+			return false;
+		}
+		slider.value = value;
+		true
 	}
 
 	pub fn order(&self) -> &[ItemId] {
@@ -550,6 +596,50 @@ mod tests {
 		let _ = std::fs::remove_dir_all(&root);
 		std::fs::create_dir_all(&root).unwrap();
 		root
+	}
+
+	#[test]
+	fn a_folder_icon_needs_no_directory_file() {
+		let root = tree("folder-icon");
+		let plain = root.join("plain");
+		let with_entry = root.join("with-entry");
+		std::fs::create_dir_all(&plain).unwrap();
+		std::fs::create_dir_all(&with_entry).unwrap();
+		std::fs::write(plain.join(".icon.svg"), "<svg/>").unwrap();
+		std::fs::write(with_entry.join(".icon.png"), "").unwrap();
+		std::fs::write(
+			with_entry.join(".directory"),
+			"[Desktop Entry]\nType=Directory\nName=With entry\n",
+		)
+		.unwrap();
+
+		let folder = Folder::scan(&root);
+		let icon = |name: &str| {
+			folder
+				.items()
+				.iter()
+				.find(|item| item.name == name)
+				.map(|item| item.icon.clone())
+				.unwrap()
+		};
+		assert_eq!(
+			icon("plain"),
+			IconRef::Path(plain.join(".icon.svg"))
+		);
+		assert_eq!(
+			icon("with-entry"),
+			IconRef::Path(with_entry.join(".icon.png"))
+		);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn a_folder_without_an_icon_keeps_the_folder_icon() {
+		let root = tree("folder-no-icon");
+		std::fs::create_dir_all(root.join("plain")).unwrap();
+		let folder = Folder::scan(&root);
+		assert_eq!(folder.items()[0].icon, IconRef::Theme(String::from("folder")));
+		std::fs::remove_dir_all(root).unwrap();
 	}
 
 	#[test]

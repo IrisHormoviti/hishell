@@ -82,7 +82,7 @@ macro_rules! config_keys {
 
 config_keys! {
 	Title => "Desktop Entry", "Name", Both, All, ConfigValue::Str(String::new());
-	Icon => "Desktop Entry", "Icon", Both, All, ConfigValue::Str(String::new());
+	Icon => "Desktop Entry", "Icon", Both, All, ConfigValue::Str(String::from(crate::entry::DEFAULT_ICON));
 
 	Wallpaper => "Folder View", "Wallpaper", Both, All, ConfigValue::Str(String::new());
 	Maximized => "Folder View", "Maximized", Both, All, ConfigValue::Bool(false);
@@ -286,7 +286,7 @@ impl Config {
 	fn blank() -> Self {
 		Self {
 			title: String::new(),
-			icon: String::new(),
+			icon: String::from(crate::entry::DEFAULT_ICON),
 			wallpaper: String::new(),
 			maximized: false,
 			grid_mode: GridMode::Lines,

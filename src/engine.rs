@@ -140,6 +140,11 @@ pub enum Command {
 	History(HistoryCommand),
 	Focus(FocusCommand),
 	Invoke(ActionId),
+	/// Move a `Type=Slider` control to `value`.
+	SetSlider {
+		path: PathBuf,
+		value: i64,
+	},
 }
 
 #[derive(Clone, Debug)]
@@ -653,6 +658,9 @@ impl Engine {
 			Command::Invoke(action) => {
 				return self.invoke(action);
 			}
+			Command::SetSlider { path, value } => {
+				return self.set_slider(&path, value);
+			}
 			Command::History(command) => {
 				let entry = match command {
 					HistoryCommand::Back => self.history.back(),
@@ -968,6 +976,14 @@ impl Engine {
 	/// that cannot be opened reports that instead of animating a launch that
 	/// never happens. This mirrors `open_item`.
 	pub fn can_open(&self, item: &Item) -> bool {
+		// A display-only row and an inline slider are not actions, even though
+		// they live in desktop entries and might match a handler by path.
+		if matches!(
+			item.kind,
+			crate::item::ItemKind::Info | crate::item::ItemKind::Slider
+		) {
+			return false;
+		}
 		if matches!(
 			item.kind,
 			crate::item::ItemKind::Application
@@ -1019,6 +1035,11 @@ impl Engine {
 				})]));
 			}
 			crate::item::ItemKind::Radio => return self.select_radio(item),
+			// The shell gives the slider itself focus when its row is
+			// activated; the engine has no item action to run.
+			crate::item::ItemKind::Slider => return Ok(Outcome::default()),
+			// An informational row carries no action of its own.
+			crate::item::ItemKind::Info => return Ok(Outcome::default()),
 			crate::item::ItemKind::Link => {
 				if let Some(target) = &item.target {
 					let request = NavigationRequest {
@@ -1067,22 +1088,112 @@ impl Engine {
 		} else {
 			crate::item::FsKind::File
 		};
-		let has_exec = crate::entry::Entry::read(&entry_path, kind).is_some_and(|entry| {
+		let entry = crate::entry::Entry::read(&entry_path, kind);
+		let has_exec = entry.as_ref().is_some_and(|entry| {
 			entry
 				.exec
 				.as_deref()
 				.is_some_and(|exec| !exec.trim().is_empty())
 		});
 		if has_exec {
-			self.dispatch(Command::Launch(LaunchRequest::Control {
+			// The command is written with the state the entry currently has.
+			// Show that flip now: the provider's rewrite and the folder poll
+			// confirm it a moment later, but the switch must move under the
+			// finger.
+			let on = entry.as_ref().is_some_and(|entry| !entry.toggle);
+			let mut outcome = self.dispatch(Command::Launch(LaunchRequest::Control {
 				path: item.path.clone(),
 				values: Vec::new(),
-			}))
+			}))?;
+			let updated = self
+				.folder
+				.as_mut()
+				.is_some_and(|folder| folder.set_toggle(&item.path, on));
+			if updated {
+				self.revision += 1;
+				outcome.changes.folder = FolderDelta::Items {
+					added: Vec::new(),
+					removed: Vec::new(),
+					updated: vec![item.id],
+					order: self
+						.folder
+						.as_ref()
+						.map(|folder| folder.order().to_vec())
+						.unwrap_or_default(),
+				};
+			}
+			Ok(outcome)
 		} else {
 			self.dispatch(Command::Run(crate::ops::Op::Toggle {
 				path: item.path.clone(),
 			}))
 		}
+	}
+
+	/// Move a `Type=Slider` control to `value`.
+	///
+	/// The knob must follow the finger, so the new position is applied in
+	/// memory and reported as an item update. The provider command is what
+	/// stores it, and the rescan that follows confirms the value or puts the
+	/// knob back when the command failed.
+	fn set_slider(&mut self, path: &Path, value: i64) -> Result<Outcome, Error> {
+		let Some(item) = self
+			.folder
+			.as_ref()
+			.and_then(|folder| folder.items().iter().find(|item| item.path == path))
+			.cloned()
+		else {
+			return Ok(Outcome::default());
+		};
+		let Some(scale) = item.slider else {
+			return Ok(Outcome::default());
+		};
+		let value = snap_slider(value, scale);
+		if value == scale.value {
+			return Ok(Outcome::default());
+		}
+		let directory = item.path.is_dir();
+		let entry_path = if directory {
+			item.path.join(".directory")
+		} else {
+			item.path.clone()
+		};
+		let kind = if directory {
+			crate::item::FsKind::Directory
+		} else {
+			crate::item::FsKind::File
+		};
+		let has_exec = crate::entry::Entry::read(&entry_path, kind).is_some_and(|entry| {
+			entry
+				.exec
+				.as_deref()
+				.is_some_and(|exec| !exec.trim().is_empty())
+		});
+		if !has_exec {
+			return Ok(Outcome::default());
+		}
+		let mut outcome = self.dispatch(Command::Launch(LaunchRequest::Control {
+			path: item.path.clone(),
+			values: vec![value],
+		}))?;
+		let updated = self
+			.folder
+			.as_mut()
+			.is_some_and(|folder| folder.set_slider(&item.path, value));
+		if updated {
+			self.revision += 1;
+			outcome.changes.folder = FolderDelta::Items {
+				added: Vec::new(),
+				removed: Vec::new(),
+				updated: vec![item.id],
+				order: self
+					.folder
+					.as_ref()
+					.map(|folder| folder.order().to_vec())
+					.unwrap_or_default(),
+			};
+		}
+		Ok(outcome)
 	}
 
 	/// Select a member of the folder's `[Radio]` group.
@@ -1142,12 +1253,16 @@ impl Engine {
 			ItemKind::Number => ControlState::Number {
 				value: item.number_value.clone(),
 			},
+			ItemKind::Slider => ControlState::Slider(item.slider.unwrap_or_default()),
 			ItemKind::Text => ControlState::Text {
 				value: item.text_value.clone(),
 				placeholder: item.text_placeholder.clone(),
 			},
 			ItemKind::Radio => ControlState::Radio { selected: false },
 			ItemKind::Button => ControlState::Button,
+			ItemKind::Info => ControlState::Value {
+				text: item.comment.clone(),
+			},
 			_ => ControlState::None,
 		}
 	}
@@ -1623,6 +1738,14 @@ fn outcome(effects: Vec<Effect>) -> Outcome {
 
 fn item_subjects(item: &Item) -> ActionSubjects {
 	use crate::item::{FsKind, ItemKind};
+	// A display-only row and an inline slider have no item actions, even
+	// though the entry itself is a file in a mounted folder.
+	if item.kind == ItemKind::Info {
+		return ActionSubjects::INFO;
+	}
+	if item.kind == ItemKind::Slider {
+		return ActionSubjects::SLIDER;
+	}
 	let mut subjects = match item.fs_kind {
 		FsKind::Directory => ActionSubjects::FOLDER,
 		FsKind::File => ActionSubjects::FILE,
@@ -1635,8 +1758,10 @@ fn item_subjects(item: &Item) -> ActionSubjects {
 		ItemKind::Button => ActionSubjects::BUTTON,
 		ItemKind::Toggle => ActionSubjects::TOGGLE,
 		ItemKind::Number => ActionSubjects::NUMBER,
+		ItemKind::Slider => ActionSubjects::SLIDER,
 		ItemKind::Text => ActionSubjects::TEXT,
 		ItemKind::Radio => ActionSubjects::RADIO,
+		ItemKind::Info => ActionSubjects::INFO,
 	});
 	if let Some(mime) = item.mime.as_deref() {
 		if mime.starts_with("image/") {
@@ -1651,6 +1776,14 @@ fn item_subjects(item: &Item) -> ActionSubjects {
 		subjects = subjects.union(ActionSubjects::PROGRESS);
 	}
 	subjects
+}
+
+/// Keep a slider value on its step, inside its range.
+fn snap_slider(value: i64, scale: crate::item::Slider) -> i64 {
+	let step = scale.step.max(1);
+	let value = value.clamp(scale.min, scale.max);
+	let steps = ((value - scale.min) as f64 / step as f64).round() as i64;
+	(scale.min + steps * step).clamp(scale.min, scale.max)
 }
 
 fn raw_config(runtime: &RuntimeSettings) -> Config {
@@ -1684,6 +1817,7 @@ mod tests {
 	use crate::action::MenuKind;
 	use crate::config::ConfigKey;
 	use crate::focus::Direction;
+	use crate::item::ItemKind;
 	use crate::view::{GridExtent, PaneId};
 
 	struct AcceptAll;
@@ -2887,6 +3021,50 @@ mod tests {
 	}
 
 	#[test]
+	fn an_info_entry_is_a_label_not_an_action() {
+		let path = temp_folder("info");
+		let entry = path.join("model.desktop");
+		std::fs::write(
+			&entry,
+			"[Desktop Entry]\nType=Info\nName=Model\nIcon=computer\nComment=RG DS Plus\n",
+		)
+		.unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		let item = engine
+			.items()
+			.iter()
+			.find(|item| item.path == entry)
+			.cloned()
+			.unwrap();
+		assert_eq!(item.kind, ItemKind::Info);
+		assert_eq!(item.title, "Model");
+		assert!(!engine.can_open(&item));
+
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: entry.clone(),
+			}))
+			.unwrap();
+		let request = ActionRequest {
+			menu: MenuKind::Context,
+			target: Target::Focus,
+		};
+		let ids: Vec<&str> = engine
+			.actions(&request)
+			.iter()
+			.map(|action| action.id.as_str())
+			.collect();
+		assert!(!ids.contains(&"open"));
+		assert!(!ids.contains(&"copy"));
+		assert!(!ids.contains(&"rename"));
+
+		let outcome = engine.dispatch(Command::Invoke(ActionId::OPEN)).unwrap();
+		assert!(outcome.effects.is_empty());
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
 	fn invoke_routes_prompts_and_operations() {
 		let path = temp_folder("invoke");
 		let file = path.join("a.txt");
@@ -2994,6 +3172,88 @@ mod tests {
 		// The provider owns the stored state.
 		let text = std::fs::read_to_string(&toggle).unwrap();
 		assert!(text.contains("Toggle=false"));
+		// The switch still moves immediately, and the change set tells the
+		// frontend to rebuild that row without a folder rescan.
+		let item = engine
+			.items()
+			.iter()
+			.find(|item| item.path == toggle)
+			.cloned()
+			.unwrap();
+		assert!(item.toggle_on);
+		assert_eq!(
+			engine.control_state(&item),
+			crate::item::ControlState::Toggle { on: true }
+		);
+		match &outcome.changes.folder {
+			FolderDelta::Items { updated, .. } => assert_eq!(updated, &vec![item.id]),
+			other => panic!("expected an item update, got {other:?}"),
+		}
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn slider_with_a_provider_launches_its_exec_and_follows_the_finger() {
+		let path = temp_folder("slider-provider");
+		let slider = path.join("brightness.desktop");
+		std::fs::write(
+			&slider,
+			"[Desktop Entry]\nType=Slider\nName=Brightness\nExec=/bin/true %v\n\
+			 SliderValue=5\nSliderMin=1\nSliderMax=8\n",
+		)
+		.unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+		let item = engine
+			.items()
+			.iter()
+			.find(|item| item.path == slider)
+			.cloned()
+			.unwrap();
+		assert_eq!(
+			engine.control_state(&item),
+			crate::item::ControlState::Slider(crate::item::Slider {
+				value: 5,
+				min: 1,
+				max: 8,
+				step: 1,
+			})
+		);
+		assert!(!engine.can_open(&item));
+
+		let outcome = engine
+			.dispatch(Command::SetSlider {
+				path: slider.clone(),
+				value: 7,
+			})
+			.unwrap();
+		assert!(matches!(outcome.effects.first(), Some(Effect::Launch(_))));
+		let item = engine
+			.items()
+			.iter()
+			.find(|item| item.path == slider)
+			.cloned()
+			.unwrap();
+		assert_eq!(item.slider.map(|scale| scale.value), Some(7));
+		match &outcome.changes.folder {
+			FolderDelta::Items { updated, .. } => assert_eq!(updated, &vec![item.id]),
+			other => panic!("expected an item update, got {other:?}"),
+		}
+
+		// The range wins over what a drag reports at the ends of the track.
+		engine
+			.dispatch(Command::SetSlider {
+				path: slider.clone(),
+				value: 99,
+			})
+			.unwrap();
+		let item = engine
+			.items()
+			.iter()
+			.find(|item| item.path == slider)
+			.cloned()
+			.unwrap();
+		assert_eq!(item.slider.map(|scale| scale.value), Some(8));
+
 		std::fs::remove_dir_all(path).unwrap();
 	}
 
