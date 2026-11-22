@@ -969,6 +969,13 @@ impl Engine {
 		self.focus.item().into_iter().collect()
 	}
 
+	/// The application the platform has configured to handle `path`, if any.
+	/// This is the same lookup OPEN performs, so a frontend can label or
+	/// special-case the handler before launching it.
+	pub fn default_app(&self, path: &Path) -> Option<crate::platform::AppEntry> {
+		self.platform.apps.as_ref()?.default_app(path)
+	}
+
 	/// Whether OPEN has something to do for `item`: start an app or a control,
 	/// navigate, or hand it to the frontend because no handler is registered.
 	///
@@ -1885,6 +1892,7 @@ mod tests {
 				name: String::from("Test"),
 				icon: None,
 				path: path.to_path_buf(),
+				open_label: None,
 			})
 		}
 

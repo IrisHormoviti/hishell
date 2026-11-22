@@ -109,7 +109,9 @@ pub fn for_mime(mime: &str) -> IconRef {
 		"application/x-executable"
 		| "application/x-sharedlib"
 		| "application/x-pie-executable"
-		| "application/x-shellscript" => "application-x-executable",
+		| "application/x-shellscript"
+		| "application/vnd.appimage"
+		| "application/x-iso9660-appimage" => "application-x-executable",
 		"application/vnd.oasis.opendocument.text"
 		| "application/msword"
 		| "application/rtf"
@@ -153,6 +155,10 @@ mod tests {
 		assert_eq!(theme("application/zip"), "package-x-generic");
 		assert_eq!(theme("text/html"), "text-html");
 		assert_eq!(theme("application/octet-stream"), "text-x-generic");
+		assert_eq!(
+			theme("application/vnd.appimage"),
+			"application-x-executable"
+		);
 		// Unknown application types keep their own themed icon name.
 		assert_eq!(
 			theme("application/x-gamecube-rom"),

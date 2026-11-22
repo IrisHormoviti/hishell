@@ -94,6 +94,9 @@ pub struct Entry {
 	pub target: Option<PathBuf>,
 	pub mime: Option<String>,
 	pub name: Option<String>,
+	/// The label OPEN shows for this handler, e.g. `View` for an image
+	/// viewer. Empty or absent keeps the shell's default verb.
+	pub open_label: Option<String>,
 	pub comment: Option<String>,
 	pub icon: Option<String>,
 	pub exec: Option<String>,
@@ -211,6 +214,7 @@ impl Entry {
 			target,
 			mime: string("MimeType").filter(|value| !value.is_empty()),
 			name: string("Name").filter(|name| !name.is_empty()),
+			open_label: string("OpenLabel").filter(|label| !label.trim().is_empty()),
 			comment: string("Comment").filter(|comment| !comment.is_empty()),
 			icon: string("Icon").filter(|icon| !icon.is_empty()),
 			exec,
@@ -676,11 +680,12 @@ mod tests {
 		let path = root.join("ride.desktop");
 		std::fs::write(
 			&path,
-			"[Desktop Entry]\nType=Application\nName=Ride\nComment=Go fast\nIcon=ride\nExec=ride %f\n",
+			"[Desktop Entry]\nType=Application\nName=Ride\nComment=Go fast\nIcon=ride\nExec=ride %f\nOpenLabel=View\n",
 		)
 		.unwrap();
 		let entry = Entry::read(&path, FsKind::File).unwrap();
 		assert_eq!(entry.name.as_deref(), Some("Ride"));
+		assert_eq!(entry.open_label.as_deref(), Some("View"));
 		assert_eq!(entry.comment.as_deref(), Some("Go fast"));
 		assert_eq!(entry.icon.as_deref(), Some("ride"));
 		assert_eq!(entry.entry_type, Some(EntryType::Application));

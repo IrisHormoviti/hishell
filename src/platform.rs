@@ -22,6 +22,8 @@ pub struct AppEntry {
 	pub name: String,
 	pub icon: Option<IconRef>,
 	pub path: PathBuf,
+	/// The label OPEN shows for this handler, from its desktop entry.
+	pub open_label: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -196,6 +198,7 @@ fn app_entry(id: &str, entry: &Entry) -> AppEntry {
 		name: entry.name.clone().unwrap_or_else(|| id.to_string()),
 		icon: entry.icon_ref(),
 		path: entry.path.clone(),
+		open_label: entry.open_label.clone(),
 	}
 }
 

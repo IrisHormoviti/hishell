@@ -69,7 +69,7 @@ const RESULT_TTL: Duration = Duration::from_secs(120);
 /// Bump when a generator's output changes in a way the source fingerprint
 /// cannot see (a new descriptor group, a different icon). Old stamps have no
 /// version and are regenerated once.
-const CACHE_VERSION: u32 = 4;
+const CACHE_VERSION: u32 = 5;
 
 #[derive(Clone, Debug)]
 struct Generator {
@@ -830,6 +830,7 @@ mod tests {
 			target: None,
 			mime: None,
 			name: None,
+			open_label: None,
 			comment: None,
 			icon: Some(icon.to_string()),
 			exec: None,
