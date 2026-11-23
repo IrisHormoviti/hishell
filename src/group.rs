@@ -316,6 +316,8 @@ mod tests {
 			slider: None,
 			text_value: String::new(),
 			text_placeholder: String::new(),
+			select_options: Vec::new(),
+			select_value: String::new(),
 			size: 0,
 			modified: 0,
 			created: 0,

@@ -49,6 +49,7 @@ pub enum ItemKind {
 	Slider,
 	Text,
 	Radio,
+	Select,
 	/// A display-only row: it carries a label, an icon and a value, and has no
 	/// action of its own.
 	Info,
@@ -101,6 +102,9 @@ pub enum ControlState {
 	Radio {
 		selected: bool,
 	},
+	Select {
+		value: String,
+	},
 	Button,
 	/// A read-only value drawn beside the label, for a `Type=Info` row.
 	Value {
@@ -142,6 +146,8 @@ pub struct Item {
 	pub slider: Option<Slider>,
 	pub text_value: String,
 	pub text_placeholder: String,
+	pub select_options: Vec<crate::entry::SelectOption>,
+	pub select_value: String,
 	pub size: u64,
 	pub modified: u64,
 	pub created: u64,

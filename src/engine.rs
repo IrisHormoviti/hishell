@@ -999,6 +999,7 @@ impl Engine {
 				| crate::item::ItemKind::Number
 				| crate::item::ItemKind::Text
 				| crate::item::ItemKind::Radio
+				| crate::item::ItemKind::Select
 		) {
 			return true;
 		}
@@ -1038,6 +1039,11 @@ impl Engine {
 			}
 			crate::item::ItemKind::Text => {
 				return Ok(outcome(vec![Effect::Prompt(Prompt::Text {
+					path: item.path.clone(),
+				})]));
+			}
+			crate::item::ItemKind::Select => {
+				return Ok(outcome(vec![Effect::Prompt(Prompt::Select {
 					path: item.path.clone(),
 				})]));
 			}
@@ -1266,6 +1272,14 @@ impl Engine {
 				placeholder: item.text_placeholder.clone(),
 			},
 			ItemKind::Radio => ControlState::Radio { selected: false },
+			ItemKind::Select => ControlState::Select {
+				value: item
+					.select_options
+					.iter()
+					.find(|option| option.value == item.select_value)
+					.map(|option| option.label.clone())
+					.unwrap_or_else(|| item.select_value.clone()),
+			},
 			ItemKind::Button => ControlState::Button,
 			ItemKind::Info => ControlState::Value {
 				text: item.comment.clone(),
@@ -1768,6 +1782,7 @@ fn item_subjects(item: &Item) -> ActionSubjects {
 		ItemKind::Slider => ActionSubjects::SLIDER,
 		ItemKind::Text => ActionSubjects::TEXT,
 		ItemKind::Radio => ActionSubjects::RADIO,
+		ItemKind::Select => ActionSubjects::SELECT,
 		ItemKind::Info => ActionSubjects::INFO,
 	});
 	if let Some(mime) = item.mime.as_deref() {
@@ -3318,6 +3333,41 @@ mod tests {
 			crate::item::ControlState::Text {
 				value: String::from("Ada"),
 				placeholder: String::new(),
+			}
+		);
+
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn a_select_entry_opens_the_select_dialog() {
+		let path = temp_folder("open-select");
+		let zone = path.join("zone.desktop");
+		std::fs::write(
+			&zone,
+			"[Desktop Entry]\nType=Select\nName=Time zone\n\
+			 SelectValue=Europe/Athens\n\
+			 Options=[{\"value\":\"Etc/UTC\",\"label\":\"UTC\"},{\"value\":\"Europe/Athens\",\"label\":\"Athens\"}]\n\
+			 Exec=set-zone %v\n",
+		)
+		.unwrap();
+		let mut engine = Engine::open(&path).unwrap();
+
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: zone.clone(),
+			}))
+			.unwrap();
+		let outcome = engine.dispatch(Command::Invoke(ActionId::OPEN)).unwrap();
+		assert!(matches!(
+			outcome.effects.first(),
+			Some(Effect::Prompt(Prompt::Select { path })) if path == &zone
+		));
+		assert_eq!(
+			engine.control_state(engine.item_at(&zone).unwrap()),
+			crate::item::ControlState::Select {
+				value: String::from("Athens")
 			}
 		);
 

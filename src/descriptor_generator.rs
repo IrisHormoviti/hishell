@@ -847,6 +847,8 @@ mod tests {
 			slider: None,
 			text_value: String::new(),
 			text_placeholder: None,
+			select_options: Vec::new(),
+			select_value: String::new(),
 			generated: false,
 			destroy: None,
 			reset: None,

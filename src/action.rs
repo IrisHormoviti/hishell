@@ -106,6 +106,7 @@ impl ActionSubjects {
 	pub const RADIO: Self = Self(1 << 11);
 	pub const TEXT: Self = Self(1 << 12);
 	pub const PROGRESS: Self = Self(1 << 13);
+	pub const SELECT: Self = Self(1 << 16);
 	/// A display-only row. It is deliberately not part of [`Self::ITEMS`], so
 	/// no item action (Open, Copy, Trash, …) is offered for it.
 	pub const INFO: Self = Self(1 << 14);
@@ -124,7 +125,8 @@ impl ActionSubjects {
 			| Self::TOGGLE.0
 			| Self::NUMBER.0
 			| Self::TEXT.0
-			| Self::RADIO.0,
+			| Self::RADIO.0
+			| Self::SELECT.0,
 	);
 
 	pub fn contains(self, other: Self) -> bool {

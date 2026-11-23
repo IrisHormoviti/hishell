@@ -28,6 +28,9 @@ pub enum Prompt {
 	Text {
 		path: PathBuf,
 	},
+	Select {
+		path: PathBuf,
+	},
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

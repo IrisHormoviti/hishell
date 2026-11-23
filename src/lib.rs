@@ -53,7 +53,7 @@ pub use descriptor::Descriptor;
 pub use engine::{
 	Command, Deps, Effect, Engine, Mode, OpenOptions, Outcome, RuntimeSettings, TickResult,
 };
-pub use entry::{Entry, EntryType, NumberField};
+pub use entry::{Entry, EntryType, NumberField, SelectOption};
 pub use error::Error;
 pub use execution::{
 	AppId, Clock, Execution, ExecutionWrapper, ExitStatus, FreeDesktopSpawner, LaunchBlockReason,

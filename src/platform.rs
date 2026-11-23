@@ -240,10 +240,10 @@ fn application_entries() -> Vec<(String, PathBuf)> {
 		};
 		for file in files.flatten() {
 			let path = file.path();
-			if path
-				.extension()
-				.and_then(|extension| extension.to_str())
-				.is_some_and(|extension| extension.eq_ignore_ascii_case("desktop"))
+			// An applet installs its entry as a `.directory` file in the same
+			// place a desktop entry would go, so it is found and defaulted the
+			// same way. The id is the file name, extension included.
+			if is_application_entry(&path)
 				&& let Some(name) = path.file_name().and_then(|name| name.to_str())
 				&& !entries.iter().any(|(id, _)| id == name)
 			{
@@ -252,6 +252,19 @@ fn application_entries() -> Vec<(String, PathBuf)> {
 		}
 	}
 	entries
+}
+
+/// A file in an `applications/` directory that is an entry: a freedesktop
+/// `.desktop`, or a ClamOS applet's `.directory` (same format, and hishell
+/// treats it as an application like any other).
+fn is_application_entry(path: &Path) -> bool {
+	path
+		.extension()
+		.and_then(|extension| extension.to_str())
+		.is_some_and(|extension| {
+			extension.eq_ignore_ascii_case("desktop")
+				|| extension.eq_ignore_ascii_case("directory")
+		})
 }
 
 fn default_application(mime: &str) -> Option<String> {
@@ -329,6 +342,17 @@ mod tests {
 		std::fs::write(&image, b"png").unwrap();
 		assert_eq!(FreeDesktopMime.mime_type(&image).0, "image/png");
 		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn an_applet_directory_entry_is_an_application_entry() {
+		assert!(is_application_entry(Path::new(
+			"/home/.local/share/applications/clam-text-editor.directory"
+		)));
+		assert!(is_application_entry(Path::new(
+			"/usr/share/applications/clam-image-viewer.desktop"
+		)));
+		assert!(!is_application_entry(Path::new("/home/notes.txt")));
 	}
 
 	#[test]

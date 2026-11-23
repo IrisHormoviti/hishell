@@ -268,6 +268,12 @@ impl Folder {
 				text_placeholder: entry
 					.and_then(|entry| entry.text_placeholder.clone())
 					.unwrap_or_default(),
+				select_options: entry
+					.map(|entry| entry.select_options.clone())
+					.unwrap_or_default(),
+				select_value: entry
+					.map(|entry| entry.select_value.clone())
+					.unwrap_or_default(),
 				size: raw
 					.metadata
 					.as_ref()

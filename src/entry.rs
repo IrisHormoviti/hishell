@@ -20,6 +20,7 @@ pub enum EntryType {
 	Slider,
 	Text,
 	Radio,
+	Select,
 	Info,
 	File,
 }
@@ -36,6 +37,7 @@ impl EntryType {
 			Self::Slider => "Slider",
 			Self::Text => "Text",
 			Self::Radio => "Radio",
+			Self::Select => "Select",
 			Self::Info => "Info",
 			Self::File => "File",
 		}
@@ -52,6 +54,7 @@ impl EntryType {
 			"slider" => Some(Self::Slider),
 			"text" => Some(Self::Text),
 			"radio" => Some(Self::Radio),
+			"select" => Some(Self::Select),
 			"info" => Some(Self::Info),
 			"file" => Some(Self::File),
 			_ => None,
@@ -69,6 +72,7 @@ impl EntryType {
 			Self::Slider => ItemKind::Slider,
 			Self::Text => ItemKind::Text,
 			Self::Radio => ItemKind::Radio,
+			Self::Select => ItemKind::Select,
 			Self::Info => ItemKind::Info,
 			Self::File => ItemKind::File,
 		}
@@ -83,6 +87,15 @@ pub struct NumberField {
 	pub min: i64,
 	pub max: i64,
 	pub default: i64,
+}
+
+/// One choice a `Type=Select` dialog offers.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SelectOption {
+	pub value: String,
+	pub label: String,
+	pub comment: Option<String>,
+	pub icon: Option<String>,
 }
 
 /// The metadata a desktop entry supplies for one item.
@@ -120,6 +133,10 @@ pub struct Entry {
 	pub text_value: String,
 	/// Placeholder shown for an empty `Type=Text` field.
 	pub text_placeholder: Option<String>,
+	/// The choices a `Type=Select` dialog offers.
+	pub select_options: Vec<SelectOption>,
+	/// The option value a `Type=Select` currently has selected.
+	pub select_value: String,
 	/// Written by a provider daemon rather than the user.
 	pub generated: bool,
 	/// Provider actions for a generated entry or section.
@@ -231,6 +248,8 @@ impl Entry {
 			slider: (entry_type == Some(EntryType::Slider)).then(|| slider(values)),
 			text_value: string("Text").unwrap_or_default(),
 			text_placeholder: string("TextPlaceholder").filter(|value| !value.is_empty()),
+			select_options: select_options(values.get("Options")),
+			select_value: string("SelectValue").unwrap_or_default(),
 			generated: value_bool(values.get("Generated")),
 			destroy: string("Destroy").filter(|command| !command.trim().is_empty()),
 			reset: string("Reset").filter(|command| !command.trim().is_empty()),
@@ -279,6 +298,17 @@ impl Entry {
 	/// The provider command for a `Type=Text` control. `%v` is replaced by
 	/// the entered text.
 	pub fn text_args(&self, value: &str) -> Result<Vec<String>, String> {
+		let exec = self
+			.exec
+			.as_deref()
+			.filter(|exec| !exec.trim().is_empty())
+			.ok_or_else(|| String::from("entry has no Exec"))?;
+		self.hook_args(exec, Some(value))
+	}
+
+	/// The provider command for a `Type=Select` control. `%v` is replaced by
+	/// the chosen option's value.
+	pub fn select_args(&self, value: &str) -> Result<Vec<String>, String> {
 		let exec = self
 			.exec
 			.as_deref()
@@ -506,6 +536,37 @@ fn number_fields(values: &std::collections::HashMap<String, ConfigValue>) -> Vec
 		.collect()
 }
 
+/// The `Options=` array a `Type=Select` provider writes. Every item is an
+/// object with a required `value` and optional `label`, `comment` and `icon`.
+fn select_options(value: Option<&ConfigValue>) -> Vec<SelectOption> {
+	let Some(ConfigValue::Array(items)) = value else {
+		return Vec::new();
+	};
+	items
+		.iter()
+		.filter_map(|item| {
+			let ConfigValue::Dictionary(values) = item else {
+				return None;
+			};
+			let value = value_string(values.get("value"))?;
+			if value.trim().is_empty() {
+				return None;
+			}
+			let label = value_string(values.get("label"))
+				.filter(|label| !label.trim().is_empty())
+				.unwrap_or_else(|| value.clone());
+			Some(SelectOption {
+				value,
+				label,
+				comment: value_string(values.get("comment"))
+					.filter(|comment| !comment.trim().is_empty()),
+				icon: value_string(values.get("icon"))
+					.filter(|icon| !icon.trim().is_empty()),
+			})
+		})
+		.collect()
+}
+
 fn number_value(values: &std::collections::HashMap<String, ConfigValue>) -> String {
 	let count = value_int(values, "NumberCount").unwrap_or(0).clamp(0, 16);
 	(1..=count)
@@ -691,6 +752,34 @@ mod tests {
 		assert_eq!(entry.entry_type, Some(EntryType::Application));
 		assert_eq!(entry.exec.as_deref(), Some("ride %f"));
 		assert!(!entry.hidden);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn reads_a_select_entry_with_its_options() {
+		let root = window("select");
+		let path = root.join("zone.desktop");
+		std::fs::write(
+			&path,
+			"[Desktop Entry]\nType=Select\nName=Time zone\n\
+			 SelectValue=Europe/Athens\n\
+			 Options=[{\"value\":\"Etc/UTC\",\"label\":\"UTC\"},{\"value\":\"Europe/Athens\",\"label\":\"Athens\",\"comment\":\"Europe/Athens\",\"icon\":\"clock\"}]\n\
+			 Exec=set-zone %v\n",
+		)
+		.unwrap();
+		let entry = Entry::read(&path, FsKind::File).unwrap();
+		assert_eq!(entry.entry_type, Some(EntryType::Select));
+		assert_eq!(entry.select_value, "Europe/Athens");
+		assert_eq!(entry.select_options.len(), 2);
+		assert_eq!(entry.select_options[0].label, "UTC");
+		assert_eq!(entry.select_options[0].comment, None);
+		assert_eq!(entry.select_options[1].label, "Athens");
+		assert_eq!(entry.select_options[1].comment.as_deref(), Some("Europe/Athens"));
+		assert_eq!(entry.select_options[1].icon.as_deref(), Some("clock"));
+		assert_eq!(
+			entry.select_args("Etc/UTC").unwrap(),
+			vec!["set-zone", "Etc/UTC"]
+		);
 		std::fs::remove_dir_all(root).unwrap();
 	}
 

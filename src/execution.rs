@@ -46,6 +46,12 @@ pub enum LaunchRequest {
 		path: PathBuf,
 		value: String,
 	},
+	/// Run a `Type=Select` provider command. `%v` is replaced by the chosen
+	/// option's value.
+	Select {
+		path: PathBuf,
+		value: String,
+	},
 	/// Run a folder's `[Radio] Exec` after a choice is selected. `%v`, `%n`
 	/// and `%p` expand to the value, display name and path.
 	Radio {
@@ -474,6 +480,22 @@ impl Execution {
 				};
 				self.text_request(&entry, &path, &value)
 			}
+			LaunchRequest::Select { path, value } => {
+				let entry_path = if path.is_dir() {
+					path.join(".directory")
+				} else {
+					path.clone()
+				};
+				let kind = if path.is_dir() {
+					FsKind::Directory
+				} else {
+					FsKind::File
+				};
+				let Some(entry) = Entry::read(&entry_path, kind) else {
+					return Err(LaunchError::NotExecutable(path));
+				};
+				self.select_request(&entry, &path, &value)
+			}
 			LaunchRequest::Radio {
 				exec,
 				value,
@@ -560,6 +582,7 @@ impl Execution {
 			| Some(EntryType::Number)
 			| Some(EntryType::Text)
 			| Some(EntryType::Radio)
+			| Some(EntryType::Select)
 			| Some(EntryType::Slider) => file.map(Path::to_path_buf),
 			Some(EntryType::File) => Some(
 				file.or(entry.target.as_deref())
@@ -663,6 +686,38 @@ impl Execution {
 		value: &str,
 	) -> Result<SpawnRequest, LaunchError> {
 		let args = entry.text_args(value).map_err(LaunchError::Exec)?;
+		let Some(program) = args.first().cloned() else {
+			return Err(LaunchError::Exec(String::from("empty Exec")));
+		};
+		Ok(SpawnRequest {
+			program,
+			args: args[1..].to_vec(),
+			item: item.to_path_buf(),
+			name: entry
+				.name
+				.clone()
+				.or_else(|| {
+					item.file_name()
+						.map(|name| name.to_string_lossy().into_owned())
+				})
+				.unwrap_or_default(),
+			cwd: entry.path.parent().map(Path::to_path_buf),
+			animation: String::new(),
+			announce: false,
+			main_display: entry.main_display,
+			through_wrapper: false,
+			wrapper_override: None,
+			track_active: false,
+		})
+	}
+
+	fn select_request(
+		&self,
+		entry: &Entry,
+		item: &Path,
+		value: &str,
+	) -> Result<SpawnRequest, LaunchError> {
+		let args = entry.select_args(value).map_err(LaunchError::Exec)?;
 		let Some(program) = args.first().cloned() else {
 			return Err(LaunchError::Exec(String::from("empty Exec")));
 		};
@@ -1016,6 +1071,32 @@ mod tests {
 		assert_eq!(outcome, LaunchOutcome::Started);
 		let spawned = spawner.spawned.lock().unwrap();
 		assert_eq!(spawned[0].1.args, vec!["Ada"]);
+		assert!(!spawned[0].1.announce);
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn a_select_command_does_not_announce_a_launch() {
+		let root = tree("select");
+		let entry = root.join("zone.desktop");
+		std::fs::write(
+			&entry,
+			"[Desktop Entry]\nType=Select\nName=Time zone\n\
+			 Options=[{\"value\":\"Etc/UTC\",\"label\":\"UTC\"}]\n\
+			 Exec=set-zone %v\n",
+		)
+		.unwrap();
+		let spawner = Arc::new(FakeSpawner::default());
+		let mut execution = Execution::new(None, spawner.clone(), Arc::new(SystemClock));
+		let outcome = execution
+			.request(LaunchRequest::Select {
+				path: entry,
+				value: String::from("Etc/UTC"),
+			})
+			.unwrap();
+		assert_eq!(outcome, LaunchOutcome::Started);
+		let spawned = spawner.spawned.lock().unwrap();
+		assert_eq!(spawned[0].1.args, vec!["Etc/UTC"]);
 		assert!(!spawned[0].1.announce);
 		std::fs::remove_dir_all(root).unwrap();
 	}
