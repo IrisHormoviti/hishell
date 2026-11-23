@@ -240,11 +240,13 @@ fn application_entries() -> Vec<(String, PathBuf)> {
 		};
 		for file in files.flatten() {
 			let path = file.path();
-			// An applet installs its entry as a `.directory` file in the same
+			// An entry may be installed as a `.directory` file in the same
 			// place a desktop entry would go, so it is found and defaulted the
-			// same way. The id is the file name, extension included.
+			// same way. The id is the file name, extension included. The
+			// folder's own `.directory` is its descriptor, not an entry.
 			if is_application_entry(&path)
 				&& let Some(name) = path.file_name().and_then(|name| name.to_str())
+				&& !name.starts_with('.')
 				&& !entries.iter().any(|(id, _)| id == name)
 			{
 				entries.push((name.to_string(), path));

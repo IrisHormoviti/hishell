@@ -14,7 +14,8 @@ use crate::view::{SortAlphaMode, SortDateMode, SortKey};
 /// How a folder scan reads the filesystem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScanOptions {
-	/// Read `.desktop` entries, sidecars, and folder `.directory` files.
+	/// Read `.desktop` and `.directory` entries, sidecars, and folder
+	/// `.directory` files.
 	pub read_entries: bool,
 	/// List dotfiles and `NoDisplay` entries.
 	pub include_hidden: bool,
@@ -86,6 +87,12 @@ impl Folder {
 						}
 					}
 					FsKind::File => {
+						// The folder's own `.directory` is its metadata, never an item,
+						// even when the scan lists dotfiles.
+						if raw.name == ".directory" {
+							consumed.insert(raw.path.clone());
+							continue;
+						}
 						if is_desktop_entry(&raw.path) {
 							let Some(entry) = Entry::read(&raw.path, FsKind::File) else {
 								continue;
@@ -508,10 +515,18 @@ fn read_entries(path: &Path) -> Vec<RawEntry> {
 		.collect()
 }
 
+/// A file that carries a desktop entry. An entry may use the `.directory`
+/// extension, which names an application entry in an `applications/` folder as
+/// well as a folder's own metadata, so both extensions are read wherever a
+/// folder is scanned.
 fn is_desktop_entry(path: &Path) -> bool {
-	path.extension()
+	path
+		.extension()
 		.and_then(|extension| extension.to_str())
-		.is_some_and(|extension| extension.eq_ignore_ascii_case("desktop"))
+		.is_some_and(|extension| {
+			extension.eq_ignore_ascii_case("desktop")
+				|| extension.eq_ignore_ascii_case("directory")
+		})
 }
 
 /// Whether nothing at all exists at `path`, including a broken symlink.
@@ -717,6 +732,31 @@ mod tests {
 		assert_eq!(item.name, "movie");
 		assert_eq!(item.title, "Movie");
 		assert!(item.is_busy());
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn a_directory_extension_entry_is_an_application_item() {
+		let root = tree("applet-entry");
+		std::fs::write(
+			root.join("clam-text-editor.directory"),
+			"[Desktop Entry]\nType=Application\nName=Text editor\n\
+			 Icon=text-x-generic\nExec=/usr/lib/clam/applets/clam-text-editor %f\n",
+		)
+		.unwrap();
+		std::fs::write(
+			root.join(".directory"),
+			"[Desktop Entry]\nType=Directory\nName=Applications\n",
+		)
+		.unwrap();
+		let folder = Folder::scan(&root);
+		assert_eq!(folder.len(), 1);
+		let item = &folder.items()[0];
+		assert_eq!(item.name, "clam-text-editor.directory");
+		assert_eq!(item.title, "Text editor");
+		assert_eq!(item.kind, ItemKind::Application);
+		assert_eq!(item.fs_kind, FsKind::File);
+		assert!(item.entry_path.is_some());
 		std::fs::remove_dir_all(root).unwrap();
 	}
 
