@@ -325,7 +325,10 @@ impl ConfigParser {
 			ConfigValue::Boolean(true)
 		} else if s == "false" {
 			ConfigValue::Boolean(false)
-		} else if s.starts_with('"') && s.ends_with('"') {
+		} else if s.len() >= 2
+			&& ((s.starts_with('"') && s.ends_with('"'))
+				|| (s.starts_with('\'') && s.ends_with('\'')))
+		{
 			ConfigValue::String(s[1..s.len() - 1].to_string())
 		} else if s.starts_with('[') && s.ends_with(']') {
 			let inner = &s[1..s.len() - 1];
@@ -389,18 +392,28 @@ impl ConfigParser {
 		let mut depth_array = 0;
 		let mut depth_dict = 0;
 		let mut depth_vec = 0;
-		let mut in_string = false;
+		let mut quote: Option<char> = None;
 
 		for c in s.chars() {
 			match c {
-				'"' => in_string = !in_string,
-				'[' if !in_string => depth_array += 1,
-				']' if !in_string => depth_array -= 1,
-				'{' if !in_string => depth_dict += 1,
-				'}' if !in_string => depth_dict -= 1,
-				'(' if !in_string => depth_vec += 1,
-				')' if !in_string => depth_vec -= 1,
-				',' if !in_string && depth_array == 0 && depth_dict == 0 && depth_vec == 0 => {
+				'"' => match quote {
+					None => quote = Some('"'),
+					Some('"') => quote = None,
+					_ => {}
+				},
+				// A single quote opens a string at the start of a token, so an
+				// apostrophe inside a bare word stays a word.
+				'\'' if quote.is_none() && current.trim().is_empty() => quote = Some('\''),
+				'\'' if quote == Some('\'') => quote = None,
+				'[' | ']' | '{' | '}' | '(' | ')' if quote.is_none() => match c {
+					'[' => depth_array += 1,
+					']' => depth_array -= 1,
+					'{' => depth_dict += 1,
+					'}' => depth_dict -= 1,
+					'(' => depth_vec += 1,
+					_ => depth_vec -= 1,
+				},
+				',' if quote.is_none() && depth_array == 0 && depth_dict == 0 && depth_vec == 0 => {
 					result.push(current.trim().to_string());
 					current.clear();
 					continue;
@@ -413,5 +426,36 @@ impl ConfigParser {
 			result.push(current.trim().to_string());
 		}
 		result
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn a_single_quoted_array_parses_like_a_double_quoted_one() {
+		for text in [
+			"[Destination]\nFrom = ['/some/path', 'another/path']\n",
+			"[Destination]\nFrom = [\"/some/path\", \"another/path\"]\n",
+		] {
+			let (sections, errors) = ConfigParser::parse_str(text, "<test>");
+			assert!(errors.is_empty(), "{errors:?}");
+			let from = sections
+				.get("Destination")
+				.and_then(|values| values.get("From"))
+				.expect("From");
+			assert_eq!(from.to_json_string(), r#"["/some/path","another/path"]"#);
+		}
+	}
+
+	#[test]
+	fn an_apostrophe_inside_a_word_is_still_a_word() {
+		let (sections, _) = ConfigParser::parse_str("[X]\nA = [rock'n'roll, b]\n", "<test>");
+		let value = sections
+			.get("X")
+			.and_then(|values| values.get("A"))
+			.unwrap();
+		assert_eq!(value.to_json_string(), r#"["rock'n'roll","b"]"#);
 	}
 }

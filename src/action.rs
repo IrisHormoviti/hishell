@@ -202,6 +202,8 @@ pub enum DisabledReason {
 	NoSelection,
 	NotApplicable,
 	Busy,
+	/// The session does not own the item or the folder it lives in.
+	ReadOnly,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

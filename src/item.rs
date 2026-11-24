@@ -127,6 +127,13 @@ pub struct Item {
 	pub path: PathBuf,
 	/// The entry that supplied this item's metadata, when there is one.
 	pub entry_path: Option<PathBuf>,
+	/// `Generated=true`: a provider daemon writes this entry from live data.
+	/// Only a provider-owned folder may trust the flag; elsewhere it is just
+	/// text in a file the user can write.
+	pub generated: bool,
+	/// The entry has a removal of its own (`Destroy=`), or it is not
+	/// generated. A generated entry without one has no file to remove.
+	pub destroyable: bool,
 	/// The target of a `Type=Link` entry.
 	pub target: Option<PathBuf>,
 	pub fs_kind: FsKind,

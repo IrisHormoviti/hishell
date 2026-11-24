@@ -109,6 +109,10 @@ config_keys! {
 	StashDotFiles => "Folder View", "StashDotFiles", Folder, Items, ConfigValue::Bool(true);
 	FreePlacementPositions => "Folder View", "FreePlacementPositions", Folder, View, ConfigValue::Json(String::from("{}"));
 
+	// Other folders whose items this one shows beside its own. Every item keeps
+	// its real path, so its permissions are its own.
+	MergeFrom => "Destination", "From", Folder, Items, ConfigValue::Json(String::from("[]"));
+
 	Top => "Layout", "Top", Both, All, ConfigValue::Json(String::from("[]"));
 	Middle => "Layout", "Middle", Both, All, ConfigValue::Json(String::from(r#"["./"]"#));
 	Bottom => "Layout", "Bottom", Both, All, ConfigValue::Json(String::from("[]"));
@@ -255,6 +259,7 @@ pub struct Config {
 	pub stash_shown: bool,
 	pub stash_dotfiles: bool,
 	pub free_placement_positions: HashMap<String, (i32, i32)>,
+	pub merge_from: Vec<String>,
 
 	pub top_layout: Vec<String>,
 	pub middle_layout: Vec<String>,
@@ -310,6 +315,7 @@ impl Config {
 			stash_shown: false,
 			stash_dotfiles: false,
 			free_placement_positions: HashMap::new(),
+			merge_from: Vec::new(),
 			top_layout: Vec::new(),
 			middle_layout: Vec::new(),
 			bottom_layout: Vec::new(),
@@ -384,6 +390,9 @@ impl Config {
 			ConfigKey::FreePlacementPositions => ConfigValue::Json(
 				serde_json::to_string(&self.free_placement_positions)
 					.unwrap_or_else(|_| "{}".into()),
+			),
+			ConfigKey::MergeFrom => ConfigValue::Json(
+				serde_json::to_string(&self.merge_from).unwrap_or_else(|_| "[]".into()),
 			),
 			ConfigKey::Top => ConfigValue::Json(
 				serde_json::to_string(&self.top_layout).unwrap_or_else(|_| "[]".into()),
@@ -467,6 +476,7 @@ impl Config {
 			ConfigKey::StashShown => self.stash_shown = boolean(key, value)?,
 			ConfigKey::StashDotFiles => self.stash_dotfiles = boolean(key, value)?,
 			ConfigKey::FreePlacementPositions => self.free_placement_positions = json(key, value)?,
+			ConfigKey::MergeFrom => self.merge_from = json(key, value)?,
 			ConfigKey::Top => self.top_layout = json(key, value)?,
 			ConfigKey::Middle => self.middle_layout = json(key, value)?,
 			ConfigKey::Bottom => self.bottom_layout = json(key, value)?,

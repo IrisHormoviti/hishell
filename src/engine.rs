@@ -290,6 +290,88 @@ impl Engine {
 		self.folder.as_ref().and_then(|folder| folder.item_at(path))
 	}
 
+	/// Whether the item may leave its folder: a drag onto another folder, or a
+	/// cut and a paste. The image's own entries move with the user's; a
+	/// provider-generated entry has no file to move.
+	///
+	/// The parent folder is the first word: a squashfs or a read-only mount
+	/// refuses the write. The host's [`crate::platform::WritePolicy`] has the
+	/// last one.
+	pub fn item_movable(&self, item: &Item) -> bool {
+		let Some(parent) = item.path.parent() else {
+			return false;
+		};
+		!self.provider_owned(item) && folder_takes_writes(parent)
+	}
+
+	/// Whether the item's own name may change.
+	///
+	/// An entry the image installed keeps its name even though it may be moved:
+	/// a `applications/` entry's name is the handler id `mimeapps.list` names.
+	pub fn item_renamable(&self, item: &Item) -> bool {
+		let Some(parent) = item.path.parent() else {
+			return false;
+		};
+		!self.image_owns(item) && !self.provider_owned(item) && folder_takes_writes(parent)
+	}
+
+	/// Whether the item may be removed.
+	///
+	/// An entry the image installed stays: the structure and the entries belong
+	/// to the image. A provider-generated entry has no backing file: its own
+	/// `Destroy=` command is the only thing that can remove it, so without that
+	/// command there is nothing to remove and the trash never appears. A
+	/// provider entry with one offers the action, and the shell asks before the
+	/// command runs.
+	pub fn item_removable(&self, item: &Item) -> bool {
+		let Some(parent) = item.path.parent() else {
+			return false;
+		};
+		!self.image_owns(item)
+			&& (!self.provider_owned(item) || item.destroyable)
+			&& folder_takes_writes(parent)
+	}
+
+	/// Whether the item offers the edit sheet at all: the rename field, a
+	/// duplicate or a removal. A generated entry with `Destroy=` counts,
+	/// because the provider removes it.
+	pub fn item_editable(&self, item: &Item) -> bool {
+		self.item_renamable(item) || self.item_removable(item)
+	}
+
+	/// Whether the open folder accepts items the user creates or pastes.
+	///
+	/// A provider-served folder takes the write into a staging queue that the
+	/// visible folder never shows, so it is read-only for new items.
+	pub fn folder_writable(&self) -> bool {
+		let folder = self.folder_path();
+		let served = self
+			.platform
+			.writes
+			.as_ref()
+			.is_some_and(|writes| writes.provider_serves(&folder));
+		!served && folder_takes_writes(&folder)
+	}
+
+	fn image_owns(&self, item: &Item) -> bool {
+		self.platform
+			.writes
+			.as_ref()
+			.is_some_and(|writes| writes.image_owns(&item.path))
+	}
+
+	fn provider_owned(&self, item: &Item) -> bool {
+		let Some(writes) = self.platform.writes.as_ref() else {
+			return false;
+		};
+		item.generated
+			&& item
+				.entry_path
+				.as_ref()
+				.and_then(|path| path.parent())
+				.is_some_and(|folder| writes.provider_serves(folder))
+	}
+
 	/// Re-read live `[Progress]` groups without rescanning the folder.
 	///
 	/// Sidecars are data the folder already read; a writer updates only the
@@ -795,6 +877,10 @@ impl Engine {
 			crate::location::LocationKind::Folder => crate::config::LocationScope::Folder,
 			crate::location::LocationKind::File => crate::config::LocationScope::File,
 		};
+		let items_movable = items.iter().all(|item| self.item_movable(item));
+		let items_renamable = items.iter().all(|item| self.item_renamable(item));
+		let items_removable = items.iter().all(|item| self.item_removable(item));
+		let folder_writable = self.folder_writable();
 
 		crate::action::DESCRIPTORS
 			.iter()
@@ -811,14 +897,27 @@ impl Engine {
 					descriptor.id,
 					ActionId::OPEN | ActionId::OPEN_WITH | ActionId::NAVIGATE
 				);
+				// The session's write policy disables the action up front, so a
+				// protected item never offers Trash, Delete or a move at all.
+				let read_only = match descriptor.id {
+					ActionId::CUT => !items_movable,
+					ActionId::RENAME => !items_renamable,
+					ActionId::TRASH | ActionId::DELETE | ActionId::DESTROY => !items_removable,
+					ActionId::PASTE
+					| ActionId::NEW_FOLDER
+					| ActionId::NEW_TEXT_FILE
+					| ActionId::DUPLICATE
+					| ActionId::CREATE_LINK => !folder_writable,
+					_ => false,
+				};
 				let enabled = (!needs_items || has_items)
 					&& !(busy && activation)
-					&& match descriptor.id {
-						ActionId::PAUSE_PROGRESS => can_pause,
-						ActionId::RESUME_PROGRESS => can_resume,
-						ActionId::STOP_PROGRESS => can_stop,
-						_ => true,
-					};
+					&& !read_only && match descriptor.id {
+					ActionId::PAUSE_PROGRESS => can_pause,
+					ActionId::RESUME_PROGRESS => can_resume,
+					ActionId::STOP_PROGRESS => can_stop,
+					_ => true,
+				};
 				ActionSpec {
 					id: descriptor.id,
 					group: descriptor.group,
@@ -827,7 +926,9 @@ impl Engine {
 					enabled,
 					visible: true,
 					checked: None,
-					disabled_reason: (!enabled).then_some(if busy && activation {
+					disabled_reason: (!enabled).then_some(if read_only {
+						crate::action::DisabledReason::ReadOnly
+					} else if busy && activation {
 						crate::action::DisabledReason::Busy
 					} else {
 						crate::action::DisabledReason::NotApplicable
@@ -845,6 +946,24 @@ impl Engine {
 			.collect();
 		let paths: Vec<PathBuf> = items.iter().map(|item| item.path.clone()).collect();
 		let first = items.first().cloned();
+		// A frontend that skipped the action list still must not write to a
+		// protected item or folder.
+		let read_only = match action {
+			ActionId::CUT => items.iter().any(|item| !self.item_movable(item)),
+			ActionId::RENAME => items.iter().any(|item| !self.item_renamable(item)),
+			ActionId::TRASH | ActionId::DELETE | ActionId::DESTROY => {
+				items.iter().any(|item| !self.item_removable(item))
+			}
+			ActionId::PASTE
+			| ActionId::NEW_FOLDER
+			| ActionId::NEW_TEXT_FILE
+			| ActionId::DUPLICATE
+			| ActionId::CREATE_LINK => !self.folder_writable(),
+			_ => false,
+		};
+		if read_only {
+			return Err(Error::Unsupported("this location is read-only"));
+		}
 		match action {
 			ActionId::OPEN | ActionId::NAVIGATE => match first {
 				Some(item) => self.open_item(&item),
@@ -1658,12 +1777,14 @@ impl Engine {
 			.map(|folder| folder.selection().clone());
 		if let Location::Folder(folder) = &self.location {
 			let include_hidden = !self.config.stash_dotfiles || self.config.show_stash;
-			let mut scanned = Folder::scan_with(
+			let roots = merged_roots(folder.path(), &self.config.merge_from);
+			let mut scanned = Folder::scan_roots(
 				folder.path(),
 				ScanOptions {
 					read_entries: self.mode == Mode::Config,
 					include_hidden,
 				},
+				&roots,
 			);
 			scanned.apply_config(&self.config);
 			if let Some(selection) = previous_selection {
@@ -1831,6 +1952,57 @@ impl std::fmt::Debug for Engine {
 			.field("revision", &self.revision)
 			.finish()
 	}
+}
+
+/// Whether `folder` accepts a new or removed entry, by the kernel's answer.
+///
+/// This is what makes a read-only mount safe without naming it: a squashfs or
+/// a `ro` bind mount refuses `W_OK` even for the session's root user.
+fn folder_takes_writes(folder: &Path) -> bool {
+	use std::os::unix::ffi::OsStrExt;
+	let Ok(folder) = std::ffi::CString::new(folder.as_os_str().as_bytes()) else {
+		return false;
+	};
+	// SAFETY: the pointer is a valid NUL-terminated path for the call.
+	unsafe { libc::access(folder.as_ptr(), libc::W_OK) == 0 }
+}
+
+/// The folders a `[Destination] From=` list merges beside its folder.
+///
+/// A value expands like any other configuration path: `~` is the home folder
+/// and a relative path is relative to the folder that declared it. A root that
+/// does not exist, or that names the folder itself, is skipped.
+fn merged_roots(folder: &Path, values: &[String]) -> Vec<PathBuf> {
+	let home = dirs::home_dir();
+	let mut roots: Vec<PathBuf> = Vec::new();
+	for value in values {
+		let value = value.trim();
+		if value.is_empty() {
+			continue;
+		}
+		let path = if value == "~" {
+			let Some(home) = home.as_ref() else {
+				continue;
+			};
+			home.clone()
+		} else if let Some(rest) = value.strip_prefix("~/") {
+			let Some(home) = home.as_ref() else {
+				continue;
+			};
+			home.join(rest)
+		} else {
+			let path = PathBuf::from(value);
+			if path.is_absolute() {
+				path
+			} else {
+				folder.join(path)
+			}
+		};
+		if path != folder && path.is_dir() && !roots.contains(&path) {
+			roots.push(path);
+		}
+	}
+	roots
 }
 
 #[cfg(test)]
@@ -3535,5 +3707,233 @@ mod tests {
 			ViewSpec::File(_) => panic!("expected a folder view"),
 		}
 		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	struct ImageOwned;
+
+	impl crate::platform::WritePolicy for ImageOwned {
+		fn image_owns(&self, _path: &Path) -> bool {
+			true
+		}
+	}
+
+	struct ProviderServed;
+
+	impl crate::platform::WritePolicy for ProviderServed {
+		fn provider_serves(&self, _folder: &Path) -> bool {
+			true
+		}
+	}
+
+	fn engine_with_policy(path: &Path, policy: Arc<dyn crate::platform::WritePolicy>) -> Engine {
+		Engine::open_with(
+			path,
+			OpenOptions {
+				deps: Deps {
+					platform: crate::platform::Platform {
+						writes: Some(policy),
+						..crate::platform::Platform::default()
+					},
+					..Deps::default()
+				},
+				..OpenOptions::default()
+			},
+		)
+		.unwrap()
+	}
+
+	fn spec(engine: &Engine, id: ActionId) -> ActionSpec {
+		engine
+			.actions(&ActionRequest {
+				menu: MenuKind::Context,
+				target: Target::Focus,
+			})
+			.into_iter()
+			.find(|spec| spec.id == id)
+			.unwrap_or_else(|| panic!("{} is not offered", id.0))
+	}
+
+	#[test]
+	fn an_image_owned_item_offers_no_write_actions() {
+		let path = temp_folder("policy-image");
+		let file = path.join("a.txt");
+		std::fs::write(&file, b"x").unwrap();
+		let mut engine = engine_with_policy(&path, Arc::new(ImageOwned));
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: file.clone(),
+			}))
+			.unwrap();
+		for id in [
+			ActionId::TRASH,
+			ActionId::DELETE,
+			ActionId::DESTROY,
+			ActionId::RENAME,
+		] {
+			let spec = spec(&engine, id);
+			assert!(!spec.enabled, "{} must be disabled", id.0);
+			assert_eq!(
+				spec.disabled_reason,
+				Some(crate::action::DisabledReason::ReadOnly),
+				"{}",
+				id.0
+			);
+		}
+		assert!(spec(&engine, ActionId::COPY).enabled);
+		let item = engine.item_at(&file).unwrap().clone();
+		assert!(engine.item_movable(&item), "the user may rearrange it");
+		assert!(!engine.item_renamable(&item));
+		assert!(!engine.item_removable(&item));
+		assert!(!engine.item_editable(&item));
+		assert!(spec(&engine, ActionId::CUT).enabled);
+		assert!(engine.dispatch(Command::Invoke(ActionId::TRASH)).is_err());
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn a_provider_owns_its_generated_entries_only() {
+		let path = temp_folder("policy-provider");
+		let device = path.join("Device");
+		let network = path.join("Network");
+		let theme = path.join("Theme");
+		std::fs::create_dir_all(&device).unwrap();
+		std::fs::write(
+			device.join(".directory"),
+			"[Desktop Entry]\nType=Directory\nName=Device\nGenerated=true\n",
+		)
+		.unwrap();
+		std::fs::create_dir_all(&network).unwrap();
+		std::fs::write(
+			network.join(".directory"),
+			"[Desktop Entry]\nType=Directory\nName=Network\nGenerated=true\n\
+			 Destroy=clam-connect wifi --forget home\n",
+		)
+		.unwrap();
+		std::fs::write(&theme, b"x").unwrap();
+		let mut engine = engine_with_policy(&path, Arc::new(ProviderServed));
+
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: device.clone(),
+			}))
+			.unwrap();
+		let generated = engine.item_at(&device).unwrap().clone();
+		assert!(generated.generated);
+		assert!(!engine.item_movable(&generated));
+		assert!(!engine.item_renamable(&generated));
+		assert!(!engine.item_removable(&generated));
+		assert!(!engine.item_editable(&generated));
+		assert!(!spec(&engine, ActionId::TRASH).enabled);
+
+		// A provider entry with its own removal command is still the user's to
+		// remove: the daemon does the work, the folder is untouched.
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: network.clone(),
+			}))
+			.unwrap();
+		let forgettable = engine.item_at(&network).unwrap().clone();
+		assert!(!engine.item_movable(&forgettable));
+		assert!(engine.item_removable(&forgettable));
+		assert!(spec(&engine, ActionId::TRASH).enabled);
+
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: theme.clone(),
+			}))
+			.unwrap();
+		let stored = engine.item_at(&theme).unwrap().clone();
+		assert!(!stored.generated);
+		assert!(engine.item_movable(&stored));
+		assert!(engine.item_renamable(&stored));
+		assert!(engine.item_removable(&stored));
+		assert!(spec(&engine, ActionId::TRASH).enabled);
+
+		let enabled = |engine: &Engine, id: ActionId| {
+			engine
+				.actions(&ActionRequest {
+					menu: MenuKind::New,
+					target: Target::Location,
+				})
+				.into_iter()
+				.any(|spec| spec.id == id && spec.enabled)
+		};
+		assert!(!enabled(&engine, ActionId::NEW_FOLDER));
+		assert!(!enabled(&engine, ActionId::NEW_TEXT_FILE));
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn a_folder_merges_the_items_of_its_roots() {
+		let path = temp_folder("merge-primary");
+		let root = temp_folder("merge-root");
+		std::fs::write(path.join("a.txt"), b"x").unwrap();
+		std::fs::write(root.join("b.txt"), b"x").unwrap();
+		std::fs::write(
+			path.join(".directory"),
+			format!("[Destination]\nFrom = ['{}']\n", root.display()),
+		)
+		.unwrap();
+
+		let engine = Engine::open(&path).unwrap();
+		let names: Vec<&str> = engine
+			.items()
+			.iter()
+			.map(|item| item.name.as_str())
+			.collect();
+		assert!(names.contains(&"a.txt"));
+		assert!(names.contains(&"b.txt"));
+		// The merged item keeps the path it really has, so its own folder's
+		// permissions decide what may happen to it.
+		let merged = engine.item_at(&root.join("b.txt")).unwrap();
+		assert_eq!(merged.path, root.join("b.txt"));
+		assert_eq!(engine.location().path(), path);
+
+		std::fs::remove_dir_all(path).unwrap();
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn a_relative_root_resolves_against_the_folder() {
+		let path = temp_folder("merge-relative");
+		let root = path.join("extra");
+		std::fs::create_dir_all(&root).unwrap();
+		std::fs::write(root.join("c.txt"), b"x").unwrap();
+		std::fs::write(path.join(".directory"), "[Destination]\nFrom = ['extra']\n").unwrap();
+
+		let engine = Engine::open(&path).unwrap();
+		let merged = engine.item_at(&root.join("c.txt")).unwrap();
+		assert_eq!(merged.path, root.join("c.txt"));
+
+		std::fs::remove_dir_all(path).unwrap();
+	}
+
+	#[test]
+	fn the_primary_folder_shadows_a_merged_name() {
+		let path = temp_folder("merge-shadow-primary");
+		let root = temp_folder("merge-shadow-root");
+		std::fs::write(path.join("same.txt"), b"primary").unwrap();
+		std::fs::write(root.join("same.txt"), b"root").unwrap();
+		std::fs::write(
+			path.join(".directory"),
+			format!("[Destination]\nFrom = [\"{}\"]\n", root.display()),
+		)
+		.unwrap();
+
+		let engine = Engine::open(&path).unwrap();
+		let shadows: Vec<&Item> = engine
+			.items()
+			.iter()
+			.filter(|item| item.name == "same.txt")
+			.collect();
+		assert_eq!(shadows.len(), 1);
+		assert_eq!(shadows[0].path, path.join("same.txt"));
+
+		std::fs::remove_dir_all(path).unwrap();
+		std::fs::remove_dir_all(root).unwrap();
 	}
 }

@@ -65,7 +65,53 @@ impl Folder {
 	}
 
 	pub fn scan_with(path: &Path, options: ScanOptions) -> Self {
-		let mut raw_entries = read_entries(path);
+		Self::scan_roots(path, options, &[])
+	}
+
+	/// Scan `path`, with the items of `roots` merged beside its own.
+	///
+	/// The primary folder comes first, then each root in order, so a name that
+	/// already appeared is skipped and the primary shadows the root. That is the
+	/// freedesktop precedence for application entries. Every item keeps the real
+	/// path inside the root it came from, so each one's own permissions apply to
+	/// it and writes still go to the primary folder.
+	pub fn scan_roots(path: &Path, options: ScanOptions, roots: &[PathBuf]) -> Self {
+		let mut items = Vec::new();
+		let mut diagnostics = Vec::new();
+		let mut names = HashSet::new();
+		for root in std::iter::once(path).chain(roots.iter().map(PathBuf::as_path)) {
+			let (found, notes) = Self::scan_root(root, options);
+			diagnostics.extend(notes);
+			for item in found {
+				if names.insert(item.name.clone()) {
+					items.push(item);
+				}
+			}
+		}
+
+		let by_path = items
+			.iter()
+			.map(|item| (item.path.clone(), item.id))
+			.collect();
+		let order = items.iter().map(|item| item.id).collect();
+
+		Self {
+			path: path.to_path_buf(),
+			items,
+			by_path,
+			order,
+			selection: Selection::default(),
+			diagnostics,
+		}
+	}
+
+	/// One root of a folder scan: its own entries, with the folder's `.directory`
+	/// and the descriptors beside them consumed rather than listed.
+	fn scan_root(
+		root: &Path,
+		options: ScanOptions,
+	) -> (Vec<Item>, Vec<crate::config::ConfigDiagnostic>) {
+		let mut raw_entries = read_entries(root);
 
 		let mut entries: HashMap<PathBuf, Entry> = HashMap::new();
 		let mut consumed: HashSet<PathBuf> = HashSet::new();
@@ -100,7 +146,7 @@ impl Folder {
 							diagnostics.extend(entry.diagnostics.iter().cloned());
 							if entry.is_descriptor() {
 								if let Some(target) = &entry.target
-									&& target.parent() == Some(path)
+									&& target.parent() == Some(root)
 									&& (target.is_file() || entry.progress.is_some())
 								{
 									if missing(target) {
@@ -111,7 +157,7 @@ impl Folder {
 								consumed.insert(raw.path.clone());
 							} else if entry.is_sidecar() {
 								if let Some(target) = sidecar_target(&raw.path)
-									&& target.parent() == Some(path)
+									&& target.parent() == Some(root)
 									&& (target.is_file() || entry.progress.is_some())
 								{
 									if missing(&target) {
@@ -168,7 +214,7 @@ impl Folder {
 				.then(|| {
 					crate::descriptor_generator::request_with_mime(
 						&raw.path,
-						path,
+						root,
 						mime.as_deref().unwrap_or_default(),
 					)
 				})
@@ -250,6 +296,8 @@ impl Folder {
 					.unwrap_or_default(),
 				path: raw.path.clone(),
 				entry_path: entry.map(|entry| entry.path.clone()),
+				generated: entry.is_some_and(|entry| entry.generated),
+				destroyable: entry.is_none_or(|entry| entry.is_destroyable()),
 				target: entry.and_then(|entry| entry.target.clone()),
 				fs_kind: raw.fs_kind,
 				kind: entry
@@ -299,20 +347,7 @@ impl Folder {
 			});
 		}
 
-		let by_path = items
-			.iter()
-			.map(|item| (item.path.clone(), item.id))
-			.collect();
-		let order = items.iter().map(|item| item.id).collect();
-
-		Self {
-			path: path.to_path_buf(),
-			items,
-			by_path,
-			order,
-			selection: Selection::default(),
-			diagnostics,
-		}
+		(items, diagnostics)
 	}
 
 	pub fn path(&self) -> &Path {

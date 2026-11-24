@@ -76,6 +76,7 @@ pub use ops::{
 pub use platform::{
 	AppCatalog, AppEntry, FreeDesktopApps, FreeDesktopMime, Launcher, Mime, MimeResolver, Platform,
 	PlatformError, Portal, PortalState, SoundPlayer, Thumbnail, ThumbnailRequest, Thumbnailer,
+	WritePolicy,
 };
 pub use progress::{Progress, ProgressAction, ProgressControl};
 pub use prompt::{FrontendRequest, Notice, Prompt};

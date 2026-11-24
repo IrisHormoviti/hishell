@@ -301,6 +301,8 @@ mod tests {
 			comment: String::new(),
 			path: PathBuf::from(name),
 			entry_path: None,
+			generated: false,
+			destroyable: true,
 			target: None,
 			fs_kind: FsKind::File,
 			kind: ItemKind::File,

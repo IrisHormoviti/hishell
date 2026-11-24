@@ -371,7 +371,9 @@ impl Entry {
 				.is_none_or(|exec| exec.trim().is_empty())
 	}
 
-	/// Whether the user may remove this item through the folder.
+	/// Whether the item has a removal of its own. A provider-generated entry
+	/// has no file behind it, so its `Destroy=` command is the only thing that
+	/// can make it go away; the shell asks before running it.
 	pub fn is_destroyable(&self) -> bool {
 		self.destroy.is_some() || !self.generated
 	}
