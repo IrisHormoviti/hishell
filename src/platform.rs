@@ -175,8 +175,8 @@ impl AppCatalog for FreeDesktopApps {
 	fn apps_for(&self, path: &Path) -> Vec<AppEntry> {
 		let mime = FreeDesktopMime.mime_type(path).0;
 		let mut apps = Vec::new();
-		for (id, entry_path) in application_entries() {
-			let Some(entry) = Entry::read(&entry_path, crate::item::FsKind::File) else {
+		for (id, entry_path, fs_kind) in application_entries() {
+			let Some(entry) = Entry::read(&entry_path, fs_kind) else {
 				continue;
 			};
 			if entry.hidden || entry.no_display {
@@ -196,11 +196,11 @@ impl AppCatalog for FreeDesktopApps {
 	fn default_app(&self, path: &Path) -> Option<AppEntry> {
 		let mime = FreeDesktopMime.mime_type(path).0;
 		let id = default_application(&mime)?;
-		let entry_path = application_entries()
+		let (entry_path, fs_kind) = application_entries()
 			.into_iter()
-			.find(|(candidate, _)| candidate == &id)
-			.map(|(_, path)| path)?;
-		let entry = Entry::read(&entry_path, crate::item::FsKind::File)?;
+			.find(|(candidate, ..)| candidate == &id)
+			.map(|(_, path, fs_kind)| (path, fs_kind))?;
+		let entry = Entry::read(&entry_path, fs_kind)?;
 		Some(app_entry(&id, &entry))
 	}
 
@@ -255,26 +255,47 @@ fn entry_mime_types(entry: &Entry) -> Option<Vec<String>> {
 	)
 }
 
-fn application_entries() -> Vec<(String, PathBuf)> {
-	let mut entries = Vec::new();
+fn application_entries() -> Vec<(String, PathBuf, crate::item::FsKind)> {
+	let mut entries: Vec<(String, PathBuf, crate::item::FsKind)> = Vec::new();
 	for dir in data_home_dirs() {
-		let root = dir.join("applications");
-		let Ok(files) = std::fs::read_dir(root) else {
+		for entry in application_entries_in(&dir.join("applications")) {
+			if !entries.iter().any(|(id, ..)| id == &entry.0) {
+				entries.push(entry);
+			}
+		}
+	}
+	entries
+}
+
+fn application_entries_in(root: &Path) -> Vec<(String, PathBuf, crate::item::FsKind)> {
+	let mut entries: Vec<(String, PathBuf, crate::item::FsKind)> = Vec::new();
+	let Ok(files) = std::fs::read_dir(root) else {
+		return entries;
+	};
+	for file in files.flatten() {
+		let path = file.path();
+		let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
 			continue;
 		};
-		for file in files.flatten() {
-			let path = file.path();
-			// An entry may be installed as a `.directory` file in the same
-			// place a desktop entry would go, so it is found and defaulted the
-			// same way. The id is the file name, extension included. The
-			// folder's own `.directory` is its descriptor, not an entry.
-			if is_application_entry(&path)
-				&& let Some(name) = path.file_name().and_then(|name| name.to_str())
-				&& !name.starts_with('.')
-				&& !entries.iter().any(|(id, _)| id == name)
-			{
-				entries.push((name.to_string(), path));
+		if name.starts_with('.') {
+			continue;
+		}
+		// A bundle is a folder whose own `.directory` is the entry, exactly
+		// like PortMaster. It is an application entry just as a `.desktop` file
+		// is; the id is the folder name.
+		if path.is_dir() {
+			let entry = path.join(".directory");
+			if entry.is_file() {
+				entries.push((name.to_string(), entry, crate::item::FsKind::Directory));
 			}
+			continue;
+		}
+		// An entry may also be installed as a `.directory` file in the same
+		// place a desktop entry would go. The id is the file name, extension
+		// included; the folder's own `.directory` is its descriptor, not an
+		// entry (it is skipped above with the dotfiles).
+		if is_application_entry(&path) {
+			entries.push((name.to_string(), path, crate::item::FsKind::File));
 		}
 	}
 	entries
@@ -379,6 +400,36 @@ mod tests {
 			"/usr/share/applications/clam-image-viewer.desktop"
 		)));
 		assert!(!is_application_entry(Path::new("/home/notes.txt")));
+	}
+
+	#[test]
+	fn a_bundle_folder_is_an_application_entry() {
+		let root = std::env::temp_dir().join(format!("hishell-platform-bundle-{}", std::process::id()));
+		let applications = root.join("applications");
+		std::fs::create_dir_all(applications.join("clam-thing")).unwrap();
+		std::fs::write(
+			applications.join("clam-thing/.directory"),
+			"[Desktop Entry]\nType=Application\nName=Thing\nExec=thing\n",
+		)
+		.unwrap();
+		std::fs::create_dir_all(applications.join("plain")).unwrap();
+		std::fs::write(applications.join("flat.desktop"), "[Desktop Entry]\nType=Application\n").unwrap();
+		std::fs::write(
+			applications.join("flat.directory"),
+			"[Desktop Entry]\nType=Application\n",
+		)
+		.unwrap();
+
+		let entries = application_entries_in(&applications);
+		assert!(entries.iter().any(|(id, path, kind)| {
+			id == "clam-thing"
+				&& path.ends_with("clam-thing/.directory")
+				&& *kind == crate::item::FsKind::Directory
+		}));
+		assert!(entries.iter().any(|(id, ..)| id == "flat.desktop"));
+		assert!(entries.iter().any(|(id, ..)| id == "flat.directory"));
+		assert!(!entries.iter().any(|(id, ..)| id == "plain"));
+		std::fs::remove_dir_all(root).unwrap();
 	}
 
 	#[test]
