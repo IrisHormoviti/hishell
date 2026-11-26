@@ -131,7 +131,7 @@ config_keys! {
 	CenterFocus => "Folder Navigation", "CenterFocus", Folder, View, ConfigValue::Bool(true);
 	SmoothScrolling => "Folder Navigation", "SmoothScrolling", Folder, View, ConfigValue::Bool(true);
 	OpenOnClick => "Folder Navigation", "OpenOnClick", Folder, View, ConfigValue::Bool(true);
-	FocusEmptySlots => "Folder Navigation", "FocusEmptySlots", Folder, View, ConfigValue::Bool(false);
+
 	DropItemPreference => "Folder Navigation", "DropItemPreference", Folder, View, ConfigValue::Str(String::from("MOVE"));
 	DropItemPreferenceMandate => "Folder Navigation", "DropItemPreferenceMandate", Folder, View, ConfigValue::Bool(false);
 
@@ -277,7 +277,6 @@ pub struct Config {
 	pub center_focus: bool,
 	pub smooth_scrolling: bool,
 	pub open_on_click: bool,
-	pub focus_empty_slots: bool,
 	pub drop_preference: DropPreference,
 	pub drop_preference_mandate: bool,
 
@@ -331,7 +330,6 @@ impl Config {
 			center_focus: false,
 			smooth_scrolling: false,
 			open_on_click: true,
-			focus_empty_slots: false,
 			drop_preference: DropPreference::Move,
 			drop_preference_mandate: false,
 			radio_enabled: false,
@@ -417,7 +415,6 @@ impl Config {
 			ConfigKey::CenterFocus => ConfigValue::Bool(self.center_focus),
 			ConfigKey::SmoothScrolling => ConfigValue::Bool(self.smooth_scrolling),
 			ConfigKey::OpenOnClick => ConfigValue::Bool(self.open_on_click),
-			ConfigKey::FocusEmptySlots => ConfigValue::Bool(self.focus_empty_slots),
 			ConfigKey::DropItemPreference => ConfigValue::Str(self.drop_preference.as_key().into()),
 			ConfigKey::DropItemPreferenceMandate => ConfigValue::Bool(self.drop_preference_mandate),
 			ConfigKey::RadioEnabled => ConfigValue::Bool(self.radio_enabled),
@@ -494,7 +491,6 @@ impl Config {
 			ConfigKey::CenterFocus => self.center_focus = boolean(key, value)?,
 			ConfigKey::SmoothScrolling => self.smooth_scrolling = boolean(key, value)?,
 			ConfigKey::OpenOnClick => self.open_on_click = boolean(key, value)?,
-			ConfigKey::FocusEmptySlots => self.focus_empty_slots = boolean(key, value)?,
 			ConfigKey::DropItemPreference => {
 				self.drop_preference = parse(key, value, DropPreference::from_key)?
 			}

@@ -43,13 +43,7 @@ pub enum ItemKind {
 	File,
 	Application,
 	Link,
-	Button,
-	Toggle,
-	Number,
-	Slider,
-	Text,
 	Radio,
-	Select,
 	/// A display-only row: it carries a label, an icon and a value, and has no
 	/// action of its own.
 	Info,
@@ -64,48 +58,13 @@ impl ItemKind {
 	}
 }
 
-/// The position and range of a `Type=Slider` control.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Slider {
-	pub value: i64,
-	pub min: i64,
-	pub max: i64,
-	pub step: i64,
-}
-
-impl Default for Slider {
-	fn default() -> Self {
-		Self {
-			value: 0,
-			min: 0,
-			max: 100,
-			step: 1,
-		}
-	}
-}
-
 /// How a control entry presents itself and what the frontend has to draw.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControlState {
 	None,
-	Toggle {
-		on: bool,
-	},
-	Number {
-		value: String,
-	},
-	Slider(Slider),
-	Text {
-		value: String,
-		placeholder: String,
-	},
 	Radio {
 		selected: bool,
 	},
-	Select {
-		value: String,
-	},
-	Button,
 	/// A read-only value drawn beside the label, for a `Type=Info` row.
 	Value {
 		text: String,
@@ -147,14 +106,6 @@ pub struct Item {
 	pub uid: Option<String>,
 	pub is_symlink: bool,
 	pub is_dotfile: bool,
-	pub toggle_on: bool,
-	pub number_value: String,
-	pub number_fields: Vec<crate::entry::NumberField>,
-	pub slider: Option<Slider>,
-	pub text_value: String,
-	pub text_placeholder: String,
-	pub select_options: Vec<crate::entry::SelectOption>,
-	pub select_value: String,
 	pub size: u64,
 	pub modified: u64,
 	pub created: u64,

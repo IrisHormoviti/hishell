@@ -14,13 +14,7 @@ pub enum EntryType {
 	Application,
 	Link,
 	Directory,
-	Button,
-	Toggle,
-	Number,
-	Slider,
-	Text,
 	Radio,
-	Select,
 	Info,
 	File,
 }
@@ -31,13 +25,7 @@ impl EntryType {
 			Self::Application => "Application",
 			Self::Link => "Link",
 			Self::Directory => "Directory",
-			Self::Button => "Button",
-			Self::Toggle => "Toggle",
-			Self::Number => "Number",
-			Self::Slider => "Slider",
-			Self::Text => "Text",
 			Self::Radio => "Radio",
-			Self::Select => "Select",
 			Self::Info => "Info",
 			Self::File => "File",
 		}
@@ -48,13 +36,7 @@ impl EntryType {
 			"application" => Some(Self::Application),
 			"link" => Some(Self::Link),
 			"directory" => Some(Self::Directory),
-			"button" => Some(Self::Button),
-			"toggle" => Some(Self::Toggle),
-			"number" => Some(Self::Number),
-			"slider" => Some(Self::Slider),
-			"text" => Some(Self::Text),
 			"radio" => Some(Self::Radio),
-			"select" => Some(Self::Select),
 			"info" => Some(Self::Info),
 			"file" => Some(Self::File),
 			_ => None,
@@ -66,36 +48,11 @@ impl EntryType {
 			Self::Application => ItemKind::Application,
 			Self::Link => ItemKind::Link,
 			Self::Directory => ItemKind::Directory,
-			Self::Button => ItemKind::Button,
-			Self::Toggle => ItemKind::Toggle,
-			Self::Number => ItemKind::Number,
-			Self::Slider => ItemKind::Slider,
-			Self::Text => ItemKind::Text,
 			Self::Radio => ItemKind::Radio,
-			Self::Select => ItemKind::Select,
 			Self::Info => ItemKind::Info,
 			Self::File => ItemKind::File,
 		}
 	}
-}
-
-/// One labelled integer a `Type=Number` dialog edits.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct NumberField {
-	pub label: String,
-	pub value: i64,
-	pub min: i64,
-	pub max: i64,
-	pub default: i64,
-}
-
-/// One choice a `Type=Select` dialog offers.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SelectOption {
-	pub value: String,
-	pub label: String,
-	pub comment: Option<String>,
-	pub icon: Option<String>,
 }
 
 /// The metadata a desktop entry supplies for one item.
@@ -125,18 +82,6 @@ pub struct Entry {
 	pub main_display: Option<i32>,
 	pub hidden: bool,
 	pub no_display: bool,
-	pub toggle: bool,
-	pub number_value: String,
-	pub number_fields: Vec<NumberField>,
-	pub slider: Option<crate::item::Slider>,
-	/// The current value of a `Type=Text` field.
-	pub text_value: String,
-	/// Placeholder shown for an empty `Type=Text` field.
-	pub text_placeholder: Option<String>,
-	/// The choices a `Type=Select` dialog offers.
-	pub select_options: Vec<SelectOption>,
-	/// The option value a `Type=Select` currently has selected.
-	pub select_value: String,
 	/// Written by a provider daemon rather than the user.
 	pub generated: bool,
 	/// Provider actions for a generated entry or section.
@@ -242,14 +187,6 @@ impl Entry {
 			main_display,
 			hidden: value_bool(values.get("Hidden")),
 			no_display: value_bool(values.get("NoDisplay")),
-			toggle: value_bool(values.get("Toggle")),
-			number_value: number_value(values),
-			number_fields: number_fields(values),
-			slider: (entry_type == Some(EntryType::Slider)).then(|| slider(values)),
-			text_value: string("Text").unwrap_or_default(),
-			text_placeholder: string("TextPlaceholder").filter(|value| !value.is_empty()),
-			select_options: select_options(values.get("Options")),
-			select_value: string("SelectValue").unwrap_or_default(),
 			generated: value_bool(values.get("Generated")),
 			destroy: string("Destroy").filter(|command| !command.trim().is_empty()),
 			reset: string("Reset").filter(|command| !command.trim().is_empty()),
@@ -270,51 +207,6 @@ impl Entry {
 			.filter(|exec| !exec.trim().is_empty())
 			.ok_or_else(|| String::from("entry has no Exec"))?;
 		self.exec_args_from(exec, file)
-	}
-
-	/// The provider command for a `Type=Toggle` or `Type=Number` control.
-	/// Toggle targets replace `%v` with `on`/`off`; number values replace
-	/// `%1`, `%2`, …
-	pub fn control_args(&self, values: &[i64]) -> Result<Vec<String>, String> {
-		let exec = self
-			.exec
-			.as_deref()
-			.filter(|exec| !exec.trim().is_empty())
-			.ok_or_else(|| String::from("entry has no Exec"))?;
-		let expanded = if values.is_empty() {
-			exec.replace("%v", if self.toggle { "off" } else { "on" })
-		} else {
-			// A slider is a single value, so `%v` is its natural field code;
-			// `%1`, `%2`, … remain the numbered fields a number dialog uses.
-			let mut expanded = exec.replace("%v", &values[0].to_string());
-			for (index, value) in values.iter().enumerate() {
-				expanded = expanded.replace(&format!("%{}", index + 1), &value.to_string());
-			}
-			expanded
-		};
-		self.exec_args_from(&expanded, None)
-	}
-
-	/// The provider command for a `Type=Text` control. `%v` is replaced by
-	/// the entered text.
-	pub fn text_args(&self, value: &str) -> Result<Vec<String>, String> {
-		let exec = self
-			.exec
-			.as_deref()
-			.filter(|exec| !exec.trim().is_empty())
-			.ok_or_else(|| String::from("entry has no Exec"))?;
-		self.hook_args(exec, Some(value))
-	}
-
-	/// The provider command for a `Type=Select` control. `%v` is replaced by
-	/// the chosen option's value.
-	pub fn select_args(&self, value: &str) -> Result<Vec<String>, String> {
-		let exec = self
-			.exec
-			.as_deref()
-			.filter(|exec| !exec.trim().is_empty())
-			.ok_or_else(|| String::from("entry has no Exec"))?;
-		self.hook_args(exec, Some(value))
 	}
 
 	fn exec_args_from(&self, exec: &str, file: Option<&Path>) -> Result<Vec<String>, String> {
@@ -358,17 +250,6 @@ impl Entry {
 			}
 		}
 		Ok(args)
-	}
-
-	/// A generated control whose only action is changing its own label.
-	pub fn is_rename_only(&self) -> bool {
-		self.generated
-			&& self.entry_type == Some(EntryType::Button)
-			&& self.rename.is_some()
-			&& self
-				.exec
-				.as_deref()
-				.is_none_or(|exec| exec.trim().is_empty())
 	}
 
 	/// Whether the item has a removal of its own. A provider-generated entry
@@ -500,82 +381,6 @@ fn value_int(values: &std::collections::HashMap<String, ConfigValue>, key: &str)
 		ConfigValue::Boolean(value) => Some(i64::from(*value)),
 		_ => None,
 	}
-}
-
-/// The `SliderValue`/`SliderMin`/`SliderMax` fields a `Type=Slider` provider
-/// writes. The step defaults to one and the value is kept inside the range.
-fn slider(values: &std::collections::HashMap<String, ConfigValue>) -> crate::item::Slider {
-	let min = value_int(values, "SliderMin").unwrap_or(0);
-	let max = value_int(values, "SliderMax").unwrap_or(100).max(min);
-	let step = value_int(values, "SliderStep").unwrap_or(1).max(1);
-	let value = value_int(values, "SliderValue")
-		.unwrap_or(min)
-		.clamp(min, max);
-	crate::item::Slider {
-		value,
-		min,
-		max,
-		step,
-	}
-}
-
-/// The `NumberNLabel`/`NumberNValue`/`NumberNMin`/`NumberNMax` fields a
-/// `Type=Number` provider writes.
-fn number_fields(values: &std::collections::HashMap<String, ConfigValue>) -> Vec<NumberField> {
-	let count = value_int(values, "NumberCount").unwrap_or(0).clamp(0, 16);
-	(1..=count)
-		.filter_map(|index| {
-			let label = value_string(values.get(&format!("Number{index}Label")))?;
-			let value = value_int(values, &format!("Number{index}Value"))?;
-			Some(NumberField {
-				label,
-				value,
-				min: value_int(values, &format!("Number{index}Min")).unwrap_or(value),
-				max: value_int(values, &format!("Number{index}Max")).unwrap_or(value),
-				default: value_int(values, &format!("Number{index}Default")).unwrap_or(value),
-			})
-		})
-		.collect()
-}
-
-/// The `Options=` array a `Type=Select` provider writes. Every item is an
-/// object with a required `value` and optional `label`, `comment` and `icon`.
-fn select_options(value: Option<&ConfigValue>) -> Vec<SelectOption> {
-	let Some(ConfigValue::Array(items)) = value else {
-		return Vec::new();
-	};
-	items
-		.iter()
-		.filter_map(|item| {
-			let ConfigValue::Dictionary(values) = item else {
-				return None;
-			};
-			let value = value_string(values.get("value"))?;
-			if value.trim().is_empty() {
-				return None;
-			}
-			let label = value_string(values.get("label"))
-				.filter(|label| !label.trim().is_empty())
-				.unwrap_or_else(|| value.clone());
-			Some(SelectOption {
-				value,
-				label,
-				comment: value_string(values.get("comment"))
-					.filter(|comment| !comment.trim().is_empty()),
-				icon: value_string(values.get("icon"))
-					.filter(|icon| !icon.trim().is_empty()),
-			})
-		})
-		.collect()
-}
-
-fn number_value(values: &std::collections::HashMap<String, ConfigValue>) -> String {
-	let count = value_int(values, "NumberCount").unwrap_or(0).clamp(0, 16);
-	(1..=count)
-		.filter_map(|index| value_int(values, &format!("Number{index}Value")))
-		.map(|value| value.to_string())
-		.collect::<Vec<_>>()
-		.join(" ")
 }
 
 /// A path value is relative to the entry file, and `~/` is the home folder.
@@ -758,34 +563,6 @@ mod tests {
 	}
 
 	#[test]
-	fn reads_a_select_entry_with_its_options() {
-		let root = window("select");
-		let path = root.join("zone.desktop");
-		std::fs::write(
-			&path,
-			"[Desktop Entry]\nType=Select\nName=Time zone\n\
-			 SelectValue=Europe/Athens\n\
-			 Options=[{\"value\":\"Etc/UTC\",\"label\":\"UTC\"},{\"value\":\"Europe/Athens\",\"label\":\"Athens\",\"comment\":\"Europe/Athens\",\"icon\":\"clock\"}]\n\
-			 Exec=set-zone %v\n",
-		)
-		.unwrap();
-		let entry = Entry::read(&path, FsKind::File).unwrap();
-		assert_eq!(entry.entry_type, Some(EntryType::Select));
-		assert_eq!(entry.select_value, "Europe/Athens");
-		assert_eq!(entry.select_options.len(), 2);
-		assert_eq!(entry.select_options[0].label, "UTC");
-		assert_eq!(entry.select_options[0].comment, None);
-		assert_eq!(entry.select_options[1].label, "Athens");
-		assert_eq!(entry.select_options[1].comment.as_deref(), Some("Europe/Athens"));
-		assert_eq!(entry.select_options[1].icon.as_deref(), Some("clock"));
-		assert_eq!(
-			entry.select_args("Etc/UTC").unwrap(),
-			vec!["set-zone", "Etc/UTC"]
-		);
-		std::fs::remove_dir_all(root).unwrap();
-	}
-
-	#[test]
 	fn an_extension_is_tried_in_order() {
 		let root = window("icon-order");
 		std::fs::write(root.join("art.png"), "").unwrap();
@@ -932,7 +709,7 @@ mod tests {
 		let path = root.join("device.desktop");
 		std::fs::write(
 			&path,
-			"[Desktop Entry]\nType=Button\nName=Device\nGenerated=true\n\
+			"[Desktop Entry]\nType=Radio\nName=Device\nGenerated=true\n\
 			 Rename=provider rename %v %n %p\n\
 			 Destroy=provider destroy %n %p\n\
 			 Reset=provider reset %p\n\
@@ -969,84 +746,6 @@ mod tests {
 			vec!["provider", "refresh", path.to_string_lossy().as_ref()]
 		);
 		assert!(entry.is_destroyable());
-		std::fs::remove_dir_all(root).unwrap();
-	}
-
-	#[test]
-	fn a_generated_button_without_exec_is_rename_only() {
-		let root = window("rename-only");
-		let path = root.join("name.desktop");
-		std::fs::write(
-			&path,
-			"[Desktop Entry]\nType=Button\nName=User\nGenerated=true\n\
-			 Rename=provider rename %v\n",
-		)
-		.unwrap();
-		assert!(Entry::read(&path, FsKind::File).unwrap().is_rename_only());
-		std::fs::remove_dir_all(root).unwrap();
-	}
-
-	#[test]
-	fn control_commands_expand_toggle_and_number_values() {
-		let root = window("controls");
-		let toggle = root.join("mute.desktop");
-		std::fs::write(
-			&toggle,
-			"[Desktop Entry]\nType=Toggle\nName=Mute\nExec=provider %v\nToggle=true\n",
-		)
-		.unwrap();
-		let entry = Entry::read(&toggle, FsKind::File).unwrap();
-		assert_eq!(entry.control_args(&[]).unwrap(), vec!["provider", "off"]);
-		let number = root.join("volume.desktop");
-		std::fs::write(
-			&number,
-			"[Desktop Entry]\nType=Number\nName=Volume\nExec=set %1 %2\n",
-		)
-		.unwrap();
-		let entry = Entry::read(&number, FsKind::File).unwrap();
-		assert_eq!(entry.control_args(&[3, 7]).unwrap(), vec!["set", "3", "7"]);
-		std::fs::remove_dir_all(root).unwrap();
-	}
-
-	#[test]
-	fn reads_number_control_fields() {
-		let root = window("numbers");
-		let path = root.join("volume.desktop");
-		std::fs::write(
-			&path,
-			"[Desktop Entry]\nType=Number\nName=Volume\nNumberCount=2\n\
-			 Number1Label=Left\nNumber1Value=3\nNumber1Min=0\nNumber1Max=10\n\
-			 Number2Label=Right\nNumber2Value=7\nNumber2Min=0\nNumber2Max=10\n",
-		)
-		.unwrap();
-		let entry = Entry::read(&path, FsKind::File).unwrap();
-		assert_eq!(entry.number_fields.len(), 2);
-		assert_eq!(entry.number_fields[0].label, "Left");
-		assert_eq!(entry.number_fields[0].value, 3);
-		assert_eq!(entry.number_fields[0].max, 10);
-		assert_eq!(entry.number_fields[1].label, "Right");
-		assert_eq!(entry.number_fields[1].value, 7);
-		std::fs::remove_dir_all(root).unwrap();
-	}
-
-	#[test]
-	fn reads_text_control_fields() {
-		let root = window("text");
-		let path = root.join("name.desktop");
-		std::fs::write(
-			&path,
-			"[Desktop Entry]\nType=Text\nName=User name\nText=Ada Lovelace\n\
-			 TextPlaceholder=Your name\nExec=provider set-name %v\n",
-		)
-		.unwrap();
-		let entry = Entry::read(&path, FsKind::File).unwrap();
-		assert_eq!(entry.entry_type, Some(EntryType::Text));
-		assert_eq!(entry.text_value, "Ada Lovelace");
-		assert_eq!(entry.text_placeholder.as_deref(), Some("Your name"));
-		assert_eq!(
-			entry.text_args("Grace Hopper").unwrap(),
-			vec!["provider", "set-name", "Grace Hopper"]
-		);
 		std::fs::remove_dir_all(root).unwrap();
 	}
 

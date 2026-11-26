@@ -33,25 +33,6 @@ pub enum LaunchRequest {
 		path: PathBuf,
 		app: AppId,
 	},
-	/// Run a `Type=Toggle` or `Type=Number` provider command. An empty
-	/// `values` means the toggle target (on/off); otherwise `%1`, `%2`, …
-	/// are replaced by the dialog values.
-	Control {
-		path: PathBuf,
-		values: Vec<i64>,
-	},
-	/// Run a `Type=Text` provider command. `%v` is replaced by the text the
-	/// user entered.
-	Text {
-		path: PathBuf,
-		value: String,
-	},
-	/// Run a `Type=Select` provider command. `%v` is replaced by the chosen
-	/// option's value.
-	Select {
-		path: PathBuf,
-		value: String,
-	},
 	/// Run a folder's `[Radio] Exec` after a choice is selected. `%v`, `%n`
 	/// and `%p` expand to the value, display name and path.
 	Radio {
@@ -447,55 +428,6 @@ impl Execution {
 				};
 				self.entry_request(&entry, &entry_path, Some(&path))
 			}
-			LaunchRequest::Control { path, values } => {
-				let directory = path.is_dir();
-				let entry_path = if directory {
-					path.join(".directory")
-				} else {
-					path.clone()
-				};
-				let kind = if directory {
-					FsKind::Directory
-				} else {
-					FsKind::File
-				};
-				let Some(entry) = Entry::read(&entry_path, kind) else {
-					return Err(LaunchError::NotExecutable(path));
-				};
-				self.control_request(&entry, &path, &values)
-			}
-			LaunchRequest::Text { path, value } => {
-				let entry_path = if path.is_dir() {
-					path.join(".directory")
-				} else {
-					path.clone()
-				};
-				let kind = if path.is_dir() {
-					FsKind::Directory
-				} else {
-					FsKind::File
-				};
-				let Some(entry) = Entry::read(&entry_path, kind) else {
-					return Err(LaunchError::NotExecutable(path));
-				};
-				self.text_request(&entry, &path, &value)
-			}
-			LaunchRequest::Select { path, value } => {
-				let entry_path = if path.is_dir() {
-					path.join(".directory")
-				} else {
-					path.clone()
-				};
-				let kind = if path.is_dir() {
-					FsKind::Directory
-				} else {
-					FsKind::File
-				};
-				let Some(entry) = Entry::read(&entry_path, kind) else {
-					return Err(LaunchError::NotExecutable(path));
-				};
-				self.select_request(&entry, &path, &value)
-			}
 			LaunchRequest::Radio {
 				exec,
 				value,
@@ -576,14 +508,7 @@ impl Execution {
 		file: Option<&Path>,
 	) -> Result<SpawnRequest, LaunchError> {
 		let file = match entry.entry_type {
-			Some(EntryType::Application)
-			| Some(EntryType::Button)
-			| Some(EntryType::Toggle)
-			| Some(EntryType::Number)
-			| Some(EntryType::Text)
-			| Some(EntryType::Radio)
-			| Some(EntryType::Select)
-			| Some(EntryType::Slider) => file.map(Path::to_path_buf),
+			Some(EntryType::Application) | Some(EntryType::Radio) => file.map(Path::to_path_buf),
 			Some(EntryType::File) => Some(
 				file.or(entry.target.as_deref())
 					.unwrap_or(item)
@@ -642,104 +567,6 @@ impl Execution {
 			through_wrapper,
 			wrapper_override: entry_execution_wrapper(&entry.path),
 			track_active: true,
-		})
-	}
-
-	fn control_request(
-		&self,
-		entry: &Entry,
-		item: &Path,
-		values: &[i64],
-	) -> Result<SpawnRequest, LaunchError> {
-		let args = entry.control_args(values).map_err(LaunchError::Exec)?;
-		let Some(program) = args.first().cloned() else {
-			return Err(LaunchError::Exec(String::from("empty Exec")));
-		};
-		Ok(SpawnRequest {
-			program,
-			args: args[1..].to_vec(),
-			item: item.to_path_buf(),
-			name: entry
-				.name
-				.clone()
-				.or_else(|| {
-					item.file_name()
-						.map(|name| name.to_string_lossy().into_owned())
-				})
-				.unwrap_or_default(),
-			cwd: entry.path.parent().map(Path::to_path_buf),
-			animation: String::new(),
-			announce: false,
-			main_display: entry.main_display,
-			// Controls talk to their provider directly; the execution wrapper
-			// is for launching applications.
-			through_wrapper: false,
-			wrapper_override: None,
-			track_active: false,
-		})
-	}
-
-	fn text_request(
-		&self,
-		entry: &Entry,
-		item: &Path,
-		value: &str,
-	) -> Result<SpawnRequest, LaunchError> {
-		let args = entry.text_args(value).map_err(LaunchError::Exec)?;
-		let Some(program) = args.first().cloned() else {
-			return Err(LaunchError::Exec(String::from("empty Exec")));
-		};
-		Ok(SpawnRequest {
-			program,
-			args: args[1..].to_vec(),
-			item: item.to_path_buf(),
-			name: entry
-				.name
-				.clone()
-				.or_else(|| {
-					item.file_name()
-						.map(|name| name.to_string_lossy().into_owned())
-				})
-				.unwrap_or_default(),
-			cwd: entry.path.parent().map(Path::to_path_buf),
-			animation: String::new(),
-			announce: false,
-			main_display: entry.main_display,
-			through_wrapper: false,
-			wrapper_override: None,
-			track_active: false,
-		})
-	}
-
-	fn select_request(
-		&self,
-		entry: &Entry,
-		item: &Path,
-		value: &str,
-	) -> Result<SpawnRequest, LaunchError> {
-		let args = entry.select_args(value).map_err(LaunchError::Exec)?;
-		let Some(program) = args.first().cloned() else {
-			return Err(LaunchError::Exec(String::from("empty Exec")));
-		};
-		Ok(SpawnRequest {
-			program,
-			args: args[1..].to_vec(),
-			item: item.to_path_buf(),
-			name: entry
-				.name
-				.clone()
-				.or_else(|| {
-					item.file_name()
-						.map(|name| name.to_string_lossy().into_owned())
-				})
-				.unwrap_or_default(),
-			cwd: entry.path.parent().map(Path::to_path_buf),
-			animation: String::new(),
-			announce: false,
-			main_display: entry.main_display,
-			through_wrapper: false,
-			wrapper_override: None,
-			track_active: false,
 		})
 	}
 
@@ -980,47 +807,6 @@ mod tests {
 	}
 
 	#[test]
-	fn a_control_runs_its_provider_without_the_wrapper() {
-		let root = tree("control");
-		let entry = root.join("volume.desktop");
-		std::fs::write(
-			&entry,
-			"[Desktop Entry]\nType=Number\nName=Volume\nExec=set %1 %2\n",
-		)
-		.unwrap();
-		let spawner = Arc::new(FakeSpawner {
-			exists: true,
-			..FakeSpawner::default()
-		});
-		let mut execution = Execution::new(
-			Some(ExecutionWrapper {
-				command: String::from("wrapper"),
-			}),
-			spawner.clone(),
-			Arc::new(SystemClock),
-		);
-		let outcome = execution
-			.request(LaunchRequest::Control {
-				path: entry,
-				values: vec![3, 7],
-			})
-			.unwrap();
-		assert_eq!(outcome, LaunchOutcome::Started);
-		let spawned = spawner.spawned.lock().unwrap();
-		assert_eq!(spawned.len(), 1);
-		assert!(!spawned[0].1.through_wrapper);
-		assert!(!spawned[0].1.track_active);
-		assert!(
-			!spawned[0].1.announce,
-			"a control must not wash the screens"
-		);
-		assert_eq!(spawned[0].1.program, "set");
-		assert_eq!(spawned[0].1.args, vec!["3", "7"]);
-		assert!(execution.active_items().is_empty());
-		std::fs::remove_dir_all(root).unwrap();
-	}
-
-	#[test]
 	fn a_radio_runs_the_folder_exec_with_placeholders() {
 		let root = tree("radio");
 		let choice = root.join("one");
@@ -1048,56 +834,6 @@ mod tests {
 			!spawned[0].1.announce,
 			"a radio change must not wash the screens"
 		);
-		std::fs::remove_dir_all(root).unwrap();
-	}
-
-	#[test]
-	fn a_text_command_does_not_announce_a_launch() {
-		let root = tree("text");
-		let entry = root.join("name.desktop");
-		std::fs::write(
-			&entry,
-			"[Desktop Entry]\nType=Text\nName=Name\nExec=set-name %v\n",
-		)
-		.unwrap();
-		let spawner = Arc::new(FakeSpawner::default());
-		let mut execution = Execution::new(None, spawner.clone(), Arc::new(SystemClock));
-		let outcome = execution
-			.request(LaunchRequest::Text {
-				path: entry,
-				value: String::from("Ada"),
-			})
-			.unwrap();
-		assert_eq!(outcome, LaunchOutcome::Started);
-		let spawned = spawner.spawned.lock().unwrap();
-		assert_eq!(spawned[0].1.args, vec!["Ada"]);
-		assert!(!spawned[0].1.announce);
-		std::fs::remove_dir_all(root).unwrap();
-	}
-
-	#[test]
-	fn a_select_command_does_not_announce_a_launch() {
-		let root = tree("select");
-		let entry = root.join("zone.desktop");
-		std::fs::write(
-			&entry,
-			"[Desktop Entry]\nType=Select\nName=Time zone\n\
-			 Options=[{\"value\":\"Etc/UTC\",\"label\":\"UTC\"}]\n\
-			 Exec=set-zone %v\n",
-		)
-		.unwrap();
-		let spawner = Arc::new(FakeSpawner::default());
-		let mut execution = Execution::new(None, spawner.clone(), Arc::new(SystemClock));
-		let outcome = execution
-			.request(LaunchRequest::Select {
-				path: entry,
-				value: String::from("Etc/UTC"),
-			})
-			.unwrap();
-		assert_eq!(outcome, LaunchOutcome::Started);
-		let spawned = spawner.spawned.lock().unwrap();
-		assert_eq!(spawned[0].1.args, vec!["Etc/UTC"]);
-		assert!(!spawned[0].1.announce);
 		std::fs::remove_dir_all(root).unwrap();
 	}
 

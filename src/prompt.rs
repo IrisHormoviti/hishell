@@ -22,15 +22,6 @@ pub enum Prompt {
 		id: LaunchId,
 		warning: LaunchWarning,
 	},
-	Number {
-		path: PathBuf,
-	},
-	Text {
-		path: PathBuf,
-	},
-	Select {
-		path: PathBuf,
-	},
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

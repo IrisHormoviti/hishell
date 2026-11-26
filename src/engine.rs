@@ -140,11 +140,6 @@ pub enum Command {
 	History(HistoryCommand),
 	Focus(FocusCommand),
 	Invoke(ActionId),
-	/// Move a `Type=Slider` control to `value`.
-	SetSlider {
-		path: PathBuf,
-		value: i64,
-	},
 }
 
 #[derive(Clone, Debug)]
@@ -502,7 +497,6 @@ impl Engine {
 	pub fn view(&self, request: ViewRequest) -> ViewSpec {
 		let interaction = InteractionSpec {
 			open_on_click: self.config.open_on_click,
-			focus_empty_slots: self.empty_slots_focus(),
 			center_focus: self.config.center_focus,
 			smooth_scrolling: self.config.smooth_scrolling,
 		};
@@ -739,9 +733,6 @@ impl Engine {
 			}
 			Command::Invoke(action) => {
 				return self.invoke(action);
-			}
-			Command::SetSlider { path, value } => {
-				return self.set_slider(&path, value);
 			}
 			Command::History(command) => {
 				let entry = match command {
@@ -1051,18 +1042,8 @@ impl Engine {
 				None => Ok(Outcome::default()),
 			},
 			ActionId::DESTROY => Ok(outcome(vec![Effect::Prompt(Prompt::Destroy { paths })])),
-			ActionId::NUMBER => match first {
-				Some(item) => Ok(outcome(vec![Effect::Prompt(Prompt::Number {
-					path: item.path,
-				})])),
-				None => Ok(Outcome::default()),
-			},
 			ActionId::RADIO => match first {
 				Some(item) => self.select_radio(&item),
-				None => Ok(Outcome::default()),
-			},
-			ActionId::TOGGLE => match first {
-				Some(item) => self.toggle_item(&item),
 				None => Ok(Outcome::default()),
 			},
 			ActionId::QUIT_ACTIVE => match first {
@@ -1102,23 +1083,14 @@ impl Engine {
 	/// that cannot be opened reports that instead of animating a launch that
 	/// never happens. This mirrors `open_item`.
 	pub fn can_open(&self, item: &Item) -> bool {
-		// A display-only row and an inline slider are not actions, even though
-		// they live in desktop entries and might match a handler by path.
-		if matches!(
-			item.kind,
-			crate::item::ItemKind::Info | crate::item::ItemKind::Slider
-		) {
+		// A display-only row is not an action, even though it lives in a
+		// desktop entry and might match a handler by path.
+		if item.kind == crate::item::ItemKind::Info {
 			return false;
 		}
 		if matches!(
 			item.kind,
-			crate::item::ItemKind::Application
-				| crate::item::ItemKind::Button
-				| crate::item::ItemKind::Toggle
-				| crate::item::ItemKind::Number
-				| crate::item::ItemKind::Text
-				| crate::item::ItemKind::Radio
-				| crate::item::ItemKind::Select
+			crate::item::ItemKind::Application | crate::item::ItemKind::Radio
 		) {
 			return true;
 		}
@@ -1139,37 +1111,17 @@ impl Engine {
 			return Ok(Outcome::default());
 		}
 		// A choice in a `[Radio]` folder is selected, not launched: the
-		// folder owns the stored value and its `[Radio] Exec`. A provider
-		// writes its choices as `Type=Button`.
+		// folder owns the stored value and its `[Radio] Exec`.
 		if self.is_radio_member(&item.path) {
 			return self.select_radio(item);
 		}
 		match item.kind {
-			crate::item::ItemKind::Button | crate::item::ItemKind::Application => {
+			crate::item::ItemKind::Application => {
 				return self.dispatch(Command::Launch(LaunchRequest::Item {
 					path: item.path.clone(),
 				}));
 			}
-			crate::item::ItemKind::Toggle => return self.toggle_item(item),
-			crate::item::ItemKind::Number => {
-				return Ok(outcome(vec![Effect::Prompt(Prompt::Number {
-					path: item.path.clone(),
-				})]));
-			}
-			crate::item::ItemKind::Text => {
-				return Ok(outcome(vec![Effect::Prompt(Prompt::Text {
-					path: item.path.clone(),
-				})]));
-			}
-			crate::item::ItemKind::Select => {
-				return Ok(outcome(vec![Effect::Prompt(Prompt::Select {
-					path: item.path.clone(),
-				})]));
-			}
 			crate::item::ItemKind::Radio => return self.select_radio(item),
-			// The shell gives the slider itself focus when its row is
-			// activated; the engine has no item action to run.
-			crate::item::ItemKind::Slider => return Ok(Outcome::default()),
 			// An informational row carries no action of its own.
 			crate::item::ItemKind::Info => return Ok(Outcome::default()),
 			crate::item::ItemKind::Link => {
@@ -1204,128 +1156,6 @@ impl Engine {
 		Ok(outcome(vec![Effect::Frontend(FrontendRequest::OpenPath(
 			item.path.clone(),
 		))]))
-	}
-
-	/// Flip a `Type=Toggle` item. A provider-owned toggle runs its `Exec` with
-	/// the target state; without one, the entry flips its own `Toggle=`.
-	fn toggle_item(&mut self, item: &Item) -> Result<Outcome, Error> {
-		let directory = item.path.is_dir();
-		let entry_path = if directory {
-			item.path.join(".directory")
-		} else {
-			item.path.clone()
-		};
-		let kind = if directory {
-			crate::item::FsKind::Directory
-		} else {
-			crate::item::FsKind::File
-		};
-		let entry = crate::entry::Entry::read(&entry_path, kind);
-		let has_exec = entry.as_ref().is_some_and(|entry| {
-			entry
-				.exec
-				.as_deref()
-				.is_some_and(|exec| !exec.trim().is_empty())
-		});
-		if has_exec {
-			// The command is written with the state the entry currently has.
-			// Show that flip now: the provider's rewrite and the folder poll
-			// confirm it a moment later, but the switch must move under the
-			// finger.
-			let on = entry.as_ref().is_some_and(|entry| !entry.toggle);
-			let mut outcome = self.dispatch(Command::Launch(LaunchRequest::Control {
-				path: item.path.clone(),
-				values: Vec::new(),
-			}))?;
-			let updated = self
-				.folder
-				.as_mut()
-				.is_some_and(|folder| folder.set_toggle(&item.path, on));
-			if updated {
-				self.revision += 1;
-				outcome.changes.folder = FolderDelta::Items {
-					added: Vec::new(),
-					removed: Vec::new(),
-					updated: vec![item.id],
-					order: self
-						.folder
-						.as_ref()
-						.map(|folder| folder.order().to_vec())
-						.unwrap_or_default(),
-				};
-			}
-			Ok(outcome)
-		} else {
-			self.dispatch(Command::Run(crate::ops::Op::Toggle {
-				path: item.path.clone(),
-			}))
-		}
-	}
-
-	/// Move a `Type=Slider` control to `value`.
-	///
-	/// The knob must follow the finger, so the new position is applied in
-	/// memory and reported as an item update. The provider command is what
-	/// stores it, and the rescan that follows confirms the value or puts the
-	/// knob back when the command failed.
-	fn set_slider(&mut self, path: &Path, value: i64) -> Result<Outcome, Error> {
-		let Some(item) = self
-			.folder
-			.as_ref()
-			.and_then(|folder| folder.items().iter().find(|item| item.path == path))
-			.cloned()
-		else {
-			return Ok(Outcome::default());
-		};
-		let Some(scale) = item.slider else {
-			return Ok(Outcome::default());
-		};
-		let value = snap_slider(value, scale);
-		if value == scale.value {
-			return Ok(Outcome::default());
-		}
-		let directory = item.path.is_dir();
-		let entry_path = if directory {
-			item.path.join(".directory")
-		} else {
-			item.path.clone()
-		};
-		let kind = if directory {
-			crate::item::FsKind::Directory
-		} else {
-			crate::item::FsKind::File
-		};
-		let has_exec = crate::entry::Entry::read(&entry_path, kind).is_some_and(|entry| {
-			entry
-				.exec
-				.as_deref()
-				.is_some_and(|exec| !exec.trim().is_empty())
-		});
-		if !has_exec {
-			return Ok(Outcome::default());
-		}
-		let mut outcome = self.dispatch(Command::Launch(LaunchRequest::Control {
-			path: item.path.clone(),
-			values: vec![value],
-		}))?;
-		let updated = self
-			.folder
-			.as_mut()
-			.is_some_and(|folder| folder.set_slider(&item.path, value));
-		if updated {
-			self.revision += 1;
-			outcome.changes.folder = FolderDelta::Items {
-				added: Vec::new(),
-				removed: Vec::new(),
-				updated: vec![item.id],
-				order: self
-					.folder
-					.as_ref()
-					.map(|folder| folder.order().to_vec())
-					.unwrap_or_default(),
-			};
-		}
-		Ok(outcome)
 	}
 
 	/// Select a member of the folder's `[Radio]` group.
@@ -1373,7 +1203,7 @@ impl Engine {
 	pub fn control_state(&self, item: &Item) -> crate::item::ControlState {
 		use crate::item::{ControlState, ItemKind};
 		// A `[Radio]` folder makes every direct child a choice, whatever its
-		// entry type; a provider writes its zones as `Type=Button`.
+		// entry type.
 		if self.is_radio_member(&item.path) {
 			return ControlState::Radio {
 				selected: !self.config.radio_selected.is_empty()
@@ -1381,25 +1211,7 @@ impl Engine {
 			};
 		}
 		match item.kind {
-			ItemKind::Toggle => ControlState::Toggle { on: item.toggle_on },
-			ItemKind::Number => ControlState::Number {
-				value: item.number_value.clone(),
-			},
-			ItemKind::Slider => ControlState::Slider(item.slider.unwrap_or_default()),
-			ItemKind::Text => ControlState::Text {
-				value: item.text_value.clone(),
-				placeholder: item.text_placeholder.clone(),
-			},
 			ItemKind::Radio => ControlState::Radio { selected: false },
-			ItemKind::Select => ControlState::Select {
-				value: item
-					.select_options
-					.iter()
-					.find(|option| option.value == item.select_value)
-					.map(|option| option.label.clone())
-					.unwrap_or_else(|| item.select_value.clone()),
-			},
-			ItemKind::Button => ControlState::Button,
 			ItemKind::Info => ControlState::Value {
 				text: item.comment.clone(),
 			},
@@ -1687,8 +1499,7 @@ impl Engine {
 	/// empty slots makes the cursor land on a heading and skip the item after
 	/// it.
 	fn empty_slots_focus(&self) -> bool {
-		self.config.focus_empty_slots
-			&& self.config.sort == crate::view::SortKey::Free
+		self.config.sort == crate::view::SortKey::Free
 			&& self.config.view_mode == crate::view::ViewMode::Grid
 	}
 
@@ -1879,31 +1690,22 @@ fn outcome(effects: Vec<Effect>) -> Outcome {
 }
 
 fn item_subjects(item: &Item) -> ActionSubjects {
-	use crate::item::{FsKind, ItemKind};
-	// A display-only row and an inline slider have no item actions, even
-	// though the entry itself is a file in a mounted folder.
+	use crate::item::ItemKind;
+	// A display-only row has no item actions, even though the entry itself is a
+	// file in a mounted folder.
 	if item.kind == ItemKind::Info {
 		return ActionSubjects::INFO;
 	}
-	if item.kind == ItemKind::Slider {
-		return ActionSubjects::SLIDER;
-	}
 	let mut subjects = match item.fs_kind {
-		FsKind::Directory => ActionSubjects::FOLDER,
-		FsKind::File => ActionSubjects::FILE,
+		crate::item::FsKind::Directory => ActionSubjects::FOLDER,
+		crate::item::FsKind::File => ActionSubjects::FILE,
 	};
 	subjects = subjects.union(match item.kind {
 		ItemKind::Directory => ActionSubjects::FOLDER,
 		ItemKind::File => ActionSubjects::FILE,
 		ItemKind::Application => ActionSubjects::APPLICATION,
 		ItemKind::Link => ActionSubjects::LINK,
-		ItemKind::Button => ActionSubjects::BUTTON,
-		ItemKind::Toggle => ActionSubjects::TOGGLE,
-		ItemKind::Number => ActionSubjects::NUMBER,
-		ItemKind::Slider => ActionSubjects::SLIDER,
-		ItemKind::Text => ActionSubjects::TEXT,
 		ItemKind::Radio => ActionSubjects::RADIO,
-		ItemKind::Select => ActionSubjects::SELECT,
 		ItemKind::Info => ActionSubjects::INFO,
 	});
 	if let Some(mime) = item.mime.as_deref() {
@@ -1919,14 +1721,6 @@ fn item_subjects(item: &Item) -> ActionSubjects {
 		subjects = subjects.union(ActionSubjects::PROGRESS);
 	}
 	subjects
-}
-
-/// Keep a slider value on its step, inside its range.
-fn snap_slider(value: i64, scale: crate::item::Slider) -> i64 {
-	let step = scale.step.max(1);
-	let value = value.clamp(scale.min, scale.max);
-	let steps = ((value - scale.min) as f64 / step as f64).round() as i64;
-	(scale.min + steps * step).clamp(scale.min, scale.max)
 }
 
 fn raw_config(runtime: &RuntimeSettings) -> Config {
@@ -2313,7 +2107,6 @@ mod tests {
 				ConfigValue::Str(String::from("HORIZONTAL")),
 			),
 			(ConfigKey::Sort, ConfigValue::Str(String::from("FREE"))),
-			(ConfigKey::FocusEmptySlots, ConfigValue::Bool(true)),
 		] {
 			engine.dispatch(Command::SetConfig { key, value }).unwrap();
 		}
@@ -2410,12 +2203,6 @@ mod tests {
 
 		// The extra screen is reachable: the cursor can move off the last
 		// occupied column into the empty one even though there is no item.
-		engine
-			.dispatch(Command::SetConfig {
-				key: ConfigKey::FocusEmptySlots,
-				value: ConfigValue::Bool(true),
-			})
-			.unwrap();
 		engine.view(request());
 		engine
 			.dispatch(Command::Focus(FocusCommand::SetCursor {
@@ -2551,7 +2338,6 @@ mod tests {
 				ConfigValue::Str(String::from("ALPHABETICAL")),
 			),
 			(ConfigKey::Group, ConfigValue::Str(String::from("LETTERS"))),
-			(ConfigKey::FocusEmptySlots, ConfigValue::Bool(true)),
 		] {
 			engine.dispatch(Command::SetConfig { key, value }).unwrap();
 		}
@@ -3379,206 +3165,6 @@ mod tests {
 	}
 
 	#[test]
-	fn toggle_with_a_provider_launches_its_exec() {
-		let path = temp_folder("toggle-provider");
-		let toggle = path.join("mute.desktop");
-		std::fs::write(
-			&toggle,
-			"[Desktop Entry]\nType=Toggle\nName=Mute\nExec=/bin/true %v\nToggle=false\n",
-		)
-		.unwrap();
-		let mut engine = Engine::open(&path).unwrap();
-		engine
-			.dispatch(Command::Focus(FocusCommand::Set {
-				pane: PaneId(0),
-				path: toggle.clone(),
-			}))
-			.unwrap();
-		let outcome = engine.dispatch(Command::Invoke(ActionId::TOGGLE)).unwrap();
-		assert!(matches!(outcome.effects.first(), Some(Effect::Launch(_))));
-		// The provider owns the stored state.
-		let text = std::fs::read_to_string(&toggle).unwrap();
-		assert!(text.contains("Toggle=false"));
-		// The switch still moves immediately, and the change set tells the
-		// frontend to rebuild that row without a folder rescan.
-		let item = engine
-			.items()
-			.iter()
-			.find(|item| item.path == toggle)
-			.cloned()
-			.unwrap();
-		assert!(item.toggle_on);
-		assert_eq!(
-			engine.control_state(&item),
-			crate::item::ControlState::Toggle { on: true }
-		);
-		match &outcome.changes.folder {
-			FolderDelta::Items { updated, .. } => assert_eq!(updated, &vec![item.id]),
-			other => panic!("expected an item update, got {other:?}"),
-		}
-		std::fs::remove_dir_all(path).unwrap();
-	}
-
-	#[test]
-	fn slider_with_a_provider_launches_its_exec_and_follows_the_finger() {
-		let path = temp_folder("slider-provider");
-		let slider = path.join("brightness.desktop");
-		std::fs::write(
-			&slider,
-			"[Desktop Entry]\nType=Slider\nName=Brightness\nExec=/bin/true %v\n\
-			 SliderValue=5\nSliderMin=1\nSliderMax=8\n",
-		)
-		.unwrap();
-		let mut engine = Engine::open(&path).unwrap();
-		let item = engine
-			.items()
-			.iter()
-			.find(|item| item.path == slider)
-			.cloned()
-			.unwrap();
-		assert_eq!(
-			engine.control_state(&item),
-			crate::item::ControlState::Slider(crate::item::Slider {
-				value: 5,
-				min: 1,
-				max: 8,
-				step: 1,
-			})
-		);
-		assert!(!engine.can_open(&item));
-
-		let outcome = engine
-			.dispatch(Command::SetSlider {
-				path: slider.clone(),
-				value: 7,
-			})
-			.unwrap();
-		assert!(matches!(outcome.effects.first(), Some(Effect::Launch(_))));
-		let item = engine
-			.items()
-			.iter()
-			.find(|item| item.path == slider)
-			.cloned()
-			.unwrap();
-		assert_eq!(item.slider.map(|scale| scale.value), Some(7));
-		match &outcome.changes.folder {
-			FolderDelta::Items { updated, .. } => assert_eq!(updated, &vec![item.id]),
-			other => panic!("expected an item update, got {other:?}"),
-		}
-
-		// The range wins over what a drag reports at the ends of the track.
-		engine
-			.dispatch(Command::SetSlider {
-				path: slider.clone(),
-				value: 99,
-			})
-			.unwrap();
-		let item = engine
-			.items()
-			.iter()
-			.find(|item| item.path == slider)
-			.cloned()
-			.unwrap();
-		assert_eq!(item.slider.map(|scale| scale.value), Some(8));
-
-		std::fs::remove_dir_all(path).unwrap();
-	}
-
-	#[test]
-	fn open_routes_controls_to_their_editors() {
-		let path = temp_folder("open-controls");
-		let number = path.join("clock.desktop");
-		std::fs::write(
-			&number,
-			"[Desktop Entry]\nType=Number\nName=Clock\nNumberCount=2\n\
-			 Number1Label=Hour\nNumber1Value=9\nNumber1Min=0\nNumber1Max=23\n\
-			 Number2Label=Minute\nNumber2Value=30\nNumber2Min=0\nNumber2Max=59\n",
-		)
-		.unwrap();
-		let text = path.join("name.desktop");
-		std::fs::write(
-			&text,
-			"[Desktop Entry]\nType=Text\nName=User name\nText=Ada\n",
-		)
-		.unwrap();
-		let mut engine = Engine::open(&path).unwrap();
-
-		engine
-			.dispatch(Command::Focus(FocusCommand::Set {
-				pane: PaneId(0),
-				path: number.clone(),
-			}))
-			.unwrap();
-		let outcome = engine.dispatch(Command::Invoke(ActionId::OPEN)).unwrap();
-		assert!(matches!(
-			outcome.effects.first(),
-			Some(Effect::Prompt(Prompt::Number { path })) if path == &number
-		));
-		assert_eq!(
-			engine.control_state(engine.item_at(&number).unwrap()),
-			crate::item::ControlState::Number {
-				value: String::from("9 30")
-			}
-		);
-
-		engine
-			.dispatch(Command::Focus(FocusCommand::Set {
-				pane: PaneId(0),
-				path: text.clone(),
-			}))
-			.unwrap();
-		let outcome = engine.dispatch(Command::Invoke(ActionId::OPEN)).unwrap();
-		assert!(matches!(
-			outcome.effects.first(),
-			Some(Effect::Prompt(Prompt::Text { path })) if path == &text
-		));
-		assert_eq!(
-			engine.control_state(engine.item_at(&text).unwrap()),
-			crate::item::ControlState::Text {
-				value: String::from("Ada"),
-				placeholder: String::new(),
-			}
-		);
-
-		std::fs::remove_dir_all(path).unwrap();
-	}
-
-	#[test]
-	fn a_select_entry_opens_the_select_dialog() {
-		let path = temp_folder("open-select");
-		let zone = path.join("zone.desktop");
-		std::fs::write(
-			&zone,
-			"[Desktop Entry]\nType=Select\nName=Time zone\n\
-			 SelectValue=Europe/Athens\n\
-			 Options=[{\"value\":\"Etc/UTC\",\"label\":\"UTC\"},{\"value\":\"Europe/Athens\",\"label\":\"Athens\"}]\n\
-			 Exec=set-zone %v\n",
-		)
-		.unwrap();
-		let mut engine = Engine::open(&path).unwrap();
-
-		engine
-			.dispatch(Command::Focus(FocusCommand::Set {
-				pane: PaneId(0),
-				path: zone.clone(),
-			}))
-			.unwrap();
-		let outcome = engine.dispatch(Command::Invoke(ActionId::OPEN)).unwrap();
-		assert!(matches!(
-			outcome.effects.first(),
-			Some(Effect::Prompt(Prompt::Select { path })) if path == &zone
-		));
-		assert_eq!(
-			engine.control_state(engine.item_at(&zone).unwrap()),
-			crate::item::ControlState::Select {
-				value: String::from("Athens")
-			}
-		);
-
-		std::fs::remove_dir_all(path).unwrap();
-	}
-
-	#[test]
 	fn opening_a_button_in_a_radio_folder_selects_it() {
 		let path = temp_folder("radio-button");
 		std::fs::write(
@@ -3589,7 +3175,7 @@ mod tests {
 		let choice = path.join("one.desktop");
 		std::fs::write(
 			&choice,
-			"[Desktop Entry]\nType=Button\nName=One\nExec=/bin/true\n",
+			"[Desktop Entry]\nType=Radio\nName=One\nExec=/bin/true\n",
 		)
 		.unwrap();
 		let mut engine = Engine::open(&path).unwrap();

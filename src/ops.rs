@@ -88,17 +88,6 @@ pub enum Op {
 		path: PathBuf,
 		degrees: i32,
 	},
-	Toggle {
-		path: PathBuf,
-	},
-	Number {
-		path: PathBuf,
-		values: Vec<i64>,
-	},
-	Text {
-		path: PathBuf,
-		value: String,
-	},
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -115,9 +104,6 @@ pub enum OpKind {
 	NewTextFile,
 	Duplicate,
 	RotateImage,
-	Toggle,
-	Number,
-	Text,
 	Launch,
 }
 
@@ -136,9 +122,6 @@ impl Op {
 			Self::NewTextFile { .. } => OpKind::NewTextFile,
 			Self::Duplicate { .. } => OpKind::Duplicate,
 			Self::RotateImage { .. } => OpKind::RotateImage,
-			Self::Toggle { .. } => OpKind::Toggle,
-			Self::Number { .. } => OpKind::Number,
-			Self::Text { .. } => OpKind::Text,
 		}
 	}
 
@@ -173,9 +156,6 @@ impl OpKind {
 			Self::NewTextFile => "new-text-file",
 			Self::Duplicate => "duplicate",
 			Self::RotateImage => "rotate-image",
-			Self::Toggle => "toggle",
-			Self::Number => "number",
-			Self::Text => "text",
 			Self::Launch => "launch",
 		}
 	}
@@ -403,18 +383,6 @@ pub fn run_with(
 			}
 		}
 		Op::RotateImage { path, degrees } => match rotate_image(path, *degrees) {
-			Ok(()) => outcome.succeeded.push(path.clone()),
-			Err(error) => fail(&mut outcome, path, error),
-		},
-		Op::Toggle { path } => match toggle_entry(path) {
-			Ok(()) => outcome.succeeded.push(path.clone()),
-			Err(error) => fail(&mut outcome, path, error),
-		},
-		Op::Number { path, values } => match set_numbers(path, values) {
-			Ok(()) => outcome.succeeded.push(path.clone()),
-			Err(error) => fail(&mut outcome, path, error),
-		},
-		Op::Text { path, value } => match set_text(path, value) {
 			Ok(()) => outcome.succeeded.push(path.clone()),
 			Err(error) => fail(&mut outcome, path, error),
 		},
@@ -906,37 +874,6 @@ fn rotate_image(path: &Path, degrees: i32) -> Result<(), OpError> {
 	rotated
 		.save(path)
 		.map_err(|error| OpError::Io(error.to_string()))
-}
-
-fn toggle_entry(path: &Path) -> Result<(), OpError> {
-	let entry = crate::entry::Entry::read(path, crate::item::FsKind::File)
-		.ok_or_else(|| OpError::Unsupported(String::from("not an entry")))?;
-	let value = if entry.toggle { "false" } else { "true" };
-	crate::config_parser::ConfigParser::set_value(path, "Desktop Entry", "Toggle", value);
-	Ok(())
-}
-
-fn set_numbers(path: &Path, values: &[i64]) -> Result<(), OpError> {
-	if crate::entry::Entry::read(path, crate::item::FsKind::File).is_none() {
-		return Err(OpError::Unsupported(String::from("not an entry")));
-	}
-	for (index, value) in values.iter().enumerate() {
-		crate::config_parser::ConfigParser::set_value(
-			path,
-			"Desktop Entry",
-			&format!("Number{}Value", index + 1),
-			&value.to_string(),
-		);
-	}
-	Ok(())
-}
-
-fn set_text(path: &Path, value: &str) -> Result<(), OpError> {
-	if crate::entry::Entry::read(path, crate::item::FsKind::File).is_none() {
-		return Err(OpError::Unsupported(String::from("not an entry")));
-	}
-	crate::config_parser::ConfigParser::set_value(path, "Desktop Entry", "Text", value);
-	Ok(())
 }
 
 fn io_error(error: std::io::Error) -> OpError {

@@ -392,7 +392,6 @@ pub struct ListSpec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InteractionSpec {
 	pub open_on_click: bool,
-	pub focus_empty_slots: bool,
 	pub center_focus: bool,
 	pub smooth_scrolling: bool,
 }
@@ -401,7 +400,6 @@ impl Default for InteractionSpec {
 	fn default() -> Self {
 		Self {
 			open_on_click: true,
-			focus_empty_slots: false,
 			center_focus: true,
 			smooth_scrolling: true,
 		}

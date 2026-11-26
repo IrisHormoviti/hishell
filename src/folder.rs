@@ -198,16 +198,17 @@ impl Folder {
 			}
 
 			let name = raw.name;
-			let mime = match raw.fs_kind {
-				FsKind::File => entry
-					.and_then(|entry| entry.mime.clone())
-					.or_else(|| crate::icon::mime_for_path(&raw.path)),
-				FsKind::Directory => None,
-			};
 			let descriptor = entry
 				.is_none()
 				.then(|| crate::descriptor::lookup(&raw.path))
 				.flatten();
+			let mime = match raw.fs_kind {
+				FsKind::File => entry
+					.and_then(|entry| entry.mime.clone())
+					.or_else(|| descriptor.as_ref().and_then(|entry| entry.mime.clone()))
+					.or_else(|| crate::icon::mime_for_path(&raw.path)),
+				FsKind::Directory => None,
+			};
 			let appimage = (raw.fs_kind == FsKind::File
 				&& entry.is_none()
 				&& crate::appimage::is_appimage(&raw.path))
@@ -312,26 +313,6 @@ impl Folder {
 				uid: entry.and_then(|entry| entry.uid.clone()),
 				is_symlink: raw.is_symlink,
 				is_dotfile: name.starts_with('.'),
-				toggle_on: entry.is_some_and(|entry| entry.toggle),
-				number_value: entry
-					.map(|entry| entry.number_value.clone())
-					.unwrap_or_default(),
-				number_fields: entry
-					.map(|entry| entry.number_fields.clone())
-					.unwrap_or_default(),
-				slider: entry.and_then(|entry| entry.slider),
-				text_value: entry
-					.map(|entry| entry.text_value.clone())
-					.unwrap_or_default(),
-				text_placeholder: entry
-					.and_then(|entry| entry.text_placeholder.clone())
-					.unwrap_or_default(),
-				select_options: entry
-					.map(|entry| entry.select_options.clone())
-					.unwrap_or_default(),
-				select_value: entry
-					.map(|entry| entry.select_value.clone())
-					.unwrap_or_default(),
 				size: raw
 					.metadata
 					.as_ref()
@@ -359,43 +340,6 @@ impl Folder {
 
 	pub fn items(&self) -> &[Item] {
 		&self.items
-	}
-
-	/// Update one control's in-memory state without rescanning the folder.
-	///
-	/// A provider control writes its entry on disk, and the folder's revision
-	/// brings the new value back. A toggle is the one control the user sees
-	/// change under the finger, so it must not wait for that round trip; the
-	/// rescan that follows confirms it (or puts it back if the command failed).
-	/// Returns whether the item was found and its value changed.
-	pub fn set_toggle(&mut self, path: &Path, on: bool) -> bool {
-		let Some(item) = self.items.iter_mut().find(|item| item.path == path) else {
-			return false;
-		};
-		if item.toggle_on == on {
-			return false;
-		}
-		item.toggle_on = on;
-		true
-	}
-
-	/// Update a slider's in-memory position without rescanning the folder.
-	///
-	/// The provider writes the value back; the slider still has to follow the
-	/// finger while the drag is in progress. The rescan that follows confirms
-	/// it, or puts the knob back when the command failed.
-	pub fn set_slider(&mut self, path: &Path, value: i64) -> bool {
-		let Some(item) = self.items.iter_mut().find(|item| item.path == path) else {
-			return false;
-		};
-		let Some(slider) = item.slider.as_mut() else {
-			return false;
-		};
-		if slider.value == value {
-			return false;
-		}
-		slider.value = value;
-		true
 	}
 
 	pub fn order(&self) -> &[ItemId] {

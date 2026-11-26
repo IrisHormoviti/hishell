@@ -19,6 +19,9 @@ pub struct Descriptor {
 	pub name: Option<String>,
 	pub comment: Option<String>,
 	pub icon: Option<String>,
+	/// The content type this descriptor assigns its target, overriding the
+	/// extension guess.
+	pub mime: Option<String>,
 	pub unmount: Option<String>,
 	pub source: PathBuf,
 }
@@ -189,12 +192,20 @@ fn parse(text: &str, source: &Path) -> Option<(PathBuf, Descriptor)> {
 	if target.as_os_str().is_empty() {
 		return None;
 	}
+	let mime = string("MimeType").and_then(|value| {
+		value
+			.split(';')
+			.map(str::trim)
+			.find(|item| !item.is_empty())
+			.map(str::to_string)
+	});
 	Some((
 		target,
 		Descriptor {
 			name: string("Name"),
 			comment: string("Comment"),
 			icon: string("Icon"),
+			mime,
 			unmount: string("Unmount"),
 			source: source.to_path_buf(),
 		},
@@ -229,6 +240,20 @@ mod tests {
 			Some(crate::item::IconRef::Theme(String::from(
 				"media-flash-microsd"
 			)))
+		);
+	}
+
+	#[test]
+	fn a_descriptor_can_name_the_content_type() {
+		let (_, descriptor) = parse(
+			"[Desktop Entry]\nType=File\nPath=/home/config.cfg\n\
+			 MimeType=application/x-clam-config;\n",
+			Path::new("/home/.local/share/hishell/directories/config.desktop"),
+		)
+		.unwrap();
+		assert_eq!(
+			descriptor.mime.as_deref(),
+			Some("application/x-clam-config")
 		);
 	}
 

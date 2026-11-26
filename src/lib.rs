@@ -53,7 +53,7 @@ pub use descriptor::Descriptor;
 pub use engine::{
 	Command, Deps, Effect, Engine, Mode, OpenOptions, Outcome, RuntimeSettings, TickResult,
 };
-pub use entry::{Entry, EntryType, NumberField, SelectOption};
+pub use entry::{Entry, EntryType};
 pub use error::Error;
 pub use execution::{
 	AppId, Clock, Execution, ExecutionWrapper, ExitStatus, FreeDesktopSpawner, LaunchBlockReason,
@@ -63,7 +63,7 @@ pub use execution::{
 pub use focus::{Direction, Focus, FocusCommand};
 pub use folder::{ProgressRefresh, ScanOptions};
 pub use history::{History, HistoryCommand, HistoryEntry, HistoryStatus};
-pub use item::{ControlState, FsKind, IconRef, Item, ItemId, ItemKind, Slider};
+pub use item::{ControlState, FsKind, IconRef, Item, ItemId, ItemKind};
 pub use jobs::{CancelToken, JobEvent, JobHandle, JobId, Jobs};
 pub use location::{File, Folder, Location, LocationKind};
 pub use navigation::{

@@ -41,8 +41,6 @@ impl ActionId {
 	pub const NEW_FOLDER: Self = Self("new-folder");
 	pub const NEW_TEXT_FILE: Self = Self("new-text-file");
 	pub const ROTATE_IMAGE: Self = Self("rotate-image");
-	pub const TOGGLE: Self = Self("toggle");
-	pub const NUMBER: Self = Self("number");
 	pub const RADIO: Self = Self("radio");
 	pub const SET_DEFAULT_APP: Self = Self("set-default-app");
 	pub const QUIT_ACTIVE: Self = Self("quit-active");
@@ -100,19 +98,11 @@ impl ActionSubjects {
 	pub const VIDEO: Self = Self(1 << 5);
 	pub const APPLICATION: Self = Self(1 << 6);
 	pub const LINK: Self = Self(1 << 7);
-	pub const BUTTON: Self = Self(1 << 8);
-	pub const TOGGLE: Self = Self(1 << 9);
-	pub const NUMBER: Self = Self(1 << 10);
 	pub const RADIO: Self = Self(1 << 11);
-	pub const TEXT: Self = Self(1 << 12);
 	pub const PROGRESS: Self = Self(1 << 13);
-	pub const SELECT: Self = Self(1 << 16);
 	/// A display-only row. It is deliberately not part of [`Self::ITEMS`], so
 	/// no item action (Open, Copy, Trash, …) is offered for it.
 	pub const INFO: Self = Self(1 << 14);
-	/// An inline slider. It is deliberately not part of [`Self::ITEMS`], so
-	/// no item action (Open, Copy, Trash, …) is offered for it.
-	pub const SLIDER: Self = Self(1 << 15);
 	pub const ITEMS: Self = Self(
 		Self::FOLDER.0
 			| Self::FILE.0
@@ -121,12 +111,7 @@ impl ActionSubjects {
 			| Self::VIDEO.0
 			| Self::APPLICATION.0
 			| Self::LINK.0
-			| Self::BUTTON.0
-			| Self::TOGGLE.0
-			| Self::NUMBER.0
-			| Self::TEXT.0
-			| Self::RADIO.0
-			| Self::SELECT.0,
+			| Self::RADIO.0,
 	);
 
 	pub fn contains(self, other: Self) -> bool {
@@ -457,26 +442,6 @@ pub static DESCRIPTORS: &[ActionDescriptor] = &[
 		icon_name: "object-rotate-right",
 		default_shortcut: None,
 		i18n_key: "rotate-image",
-	},
-	ActionDescriptor {
-		id: ActionId::TOGGLE,
-		group: GROUP_MEDIA,
-		subjects: ActionSubjects::TOGGLE,
-		menus: MAIN_CONTEXT,
-		location: LocationScope::Both,
-		icon_name: "document-edit",
-		default_shortcut: None,
-		i18n_key: "toggle",
-	},
-	ActionDescriptor {
-		id: ActionId::NUMBER,
-		group: GROUP_MEDIA,
-		subjects: ActionSubjects::NUMBER,
-		menus: MAIN_CONTEXT,
-		location: LocationScope::Both,
-		icon_name: "document-edit",
-		default_shortcut: None,
-		i18n_key: "number",
 	},
 	ActionDescriptor {
 		id: ActionId::RADIO,
