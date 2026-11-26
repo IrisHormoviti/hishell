@@ -634,10 +634,7 @@ mod tests {
 			entry_at("folder"),
 			Some(IconRef::Theme(String::from("folder")))
 		);
-		assert_eq!(
-			entry_at("./art"),
-			Some(IconRef::Path(root.join("art.png")))
-		);
+		assert_eq!(entry_at("./art"), Some(IconRef::Path(root.join("art.png"))));
 		assert_eq!(
 			entry_at("./art.png"),
 			Some(IconRef::Path(root.join("art.png")))
@@ -663,7 +660,10 @@ mod tests {
 			.unwrap();
 			Entry::read(&path, FsKind::Directory).unwrap().uid
 		};
-		assert_eq!(read("eu.raidev.coolapp"), Some(String::from("eu.raidev.coolapp")));
+		assert_eq!(
+			read("eu.raidev.coolapp"),
+			Some(String::from("eu.raidev.coolapp"))
+		);
 		// A UID is a folder name, never a path.
 		assert_eq!(read("../escape"), None);
 		assert_eq!(read("a/b"), None);

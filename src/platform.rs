@@ -323,12 +323,10 @@ fn application_entries_in(root: &Path) -> Vec<(String, PathBuf, crate::item::FsK
 /// `.desktop`, or a ClamOS applet's `.directory` (same format, and hishell
 /// treats it as an application like any other).
 fn is_application_entry(path: &Path) -> bool {
-	path
-		.extension()
+	path.extension()
 		.and_then(|extension| extension.to_str())
 		.is_some_and(|extension| {
-			extension.eq_ignore_ascii_case("desktop")
-				|| extension.eq_ignore_ascii_case("directory")
+			extension.eq_ignore_ascii_case("desktop") || extension.eq_ignore_ascii_case("directory")
 		})
 }
 
@@ -422,7 +420,8 @@ mod tests {
 
 	#[test]
 	fn a_bundle_folder_is_an_application_entry() {
-		let root = std::env::temp_dir().join(format!("hishell-platform-bundle-{}", std::process::id()));
+		let root =
+			std::env::temp_dir().join(format!("hishell-platform-bundle-{}", std::process::id()));
 		let applications = root.join("applications");
 		std::fs::create_dir_all(applications.join("clam-thing")).unwrap();
 		std::fs::write(
@@ -451,7 +450,11 @@ mod tests {
 			"[Desktop Entry]\nType=Application\nName=Config editor\nMimeType=application/x-clam-config;\n",
 		)
 		.unwrap();
-		std::fs::write(applications.join("flat.desktop"), "[Desktop Entry]\nType=Application\n").unwrap();
+		std::fs::write(
+			applications.join("flat.desktop"),
+			"[Desktop Entry]\nType=Application\n",
+		)
+		.unwrap();
 		std::fs::write(
 			applications.join("flat.directory"),
 			"[Desktop Entry]\nType=Application\n",

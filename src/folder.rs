@@ -472,7 +472,7 @@ fn read_entries(path: &Path) -> Vec<RawEntry> {
 	};
 	entries
 		.flatten()
-		.filter_map(|entry| {
+		.map(|entry| {
 			let path = entry.path();
 			let file_type = entry.file_type().ok();
 			let is_symlink = file_type.is_some_and(|kind| kind.is_symlink());
@@ -482,7 +482,7 @@ fn read_entries(path: &Path) -> Vec<RawEntry> {
 				.map(|metadata| metadata.is_dir())
 				.unwrap_or(false)
 				|| (is_symlink && path.is_dir());
-			Some(RawEntry {
+			RawEntry {
 				name: entry.file_name().to_string_lossy().into_owned(),
 				path,
 				fs_kind: if is_dir {
@@ -492,7 +492,7 @@ fn read_entries(path: &Path) -> Vec<RawEntry> {
 				},
 				is_symlink,
 				metadata,
-			})
+			}
 		})
 		.collect()
 }
@@ -502,12 +502,10 @@ fn read_entries(path: &Path) -> Vec<RawEntry> {
 /// well as a folder's own metadata, so both extensions are read wherever a
 /// folder is scanned.
 fn is_desktop_entry(path: &Path) -> bool {
-	path
-		.extension()
+	path.extension()
 		.and_then(|extension| extension.to_str())
 		.is_some_and(|extension| {
-			extension.eq_ignore_ascii_case("desktop")
-				|| extension.eq_ignore_ascii_case("directory")
+			extension.eq_ignore_ascii_case("desktop") || extension.eq_ignore_ascii_case("directory")
 		})
 }
 
@@ -629,10 +627,7 @@ mod tests {
 				.map(|item| item.icon.clone())
 				.unwrap()
 		};
-		assert_eq!(
-			icon("plain"),
-			IconRef::Path(plain.join(".icon.svg"))
-		);
+		assert_eq!(icon("plain"), IconRef::Path(plain.join(".icon.svg")));
 		assert_eq!(
 			icon("with-entry"),
 			IconRef::Path(with_entry.join(".icon.png"))
@@ -645,7 +640,10 @@ mod tests {
 		let root = tree("folder-no-icon");
 		std::fs::create_dir_all(root.join("plain")).unwrap();
 		let folder = Folder::scan(&root);
-		assert_eq!(folder.items()[0].icon, IconRef::Theme(String::from("folder")));
+		assert_eq!(
+			folder.items()[0].icon,
+			IconRef::Theme(String::from("folder"))
+		);
 		std::fs::remove_dir_all(root).unwrap();
 	}
 

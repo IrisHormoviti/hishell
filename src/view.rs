@@ -614,13 +614,7 @@ pub fn grid_spec(config: &Config, request: &ViewRequest) -> GridSpec {
 			// mode allows. Capping it at eight left the block centred in a
 			// wide pane with empty bands on both sides.
 			let lines = (((main + gap) / pitch).floor() as i64).clamp(1, 255) as u8;
-			(
-				GridSizing::FixedIcon {
-					icon_size: icon_size,
-				},
-				lines,
-				icon,
-			)
+			(GridSizing::FixedIcon { icon_size }, lines, icon)
 		}
 	};
 
@@ -725,11 +719,12 @@ mod tests {
 	#[test]
 	fn one_line_sizes_the_icons_to_the_strip() {
 		let mut config = Config::default();
+		config.set(ConfigKey::Lines, ConfigValue::Int(1)).unwrap();
 		config
-			.set(ConfigKey::Lines, ConfigValue::Int(1))
-			.unwrap();
-		config
-			.set(ConfigKey::ScrollDirection, ConfigValue::Str("HORIZONTAL".into()))
+			.set(
+				ConfigKey::ScrollDirection,
+				ConfigValue::Str("HORIZONTAL".into()),
+			)
 			.unwrap();
 		config
 			.set(ConfigKey::ShowLabels, ConfigValue::Bool(false))

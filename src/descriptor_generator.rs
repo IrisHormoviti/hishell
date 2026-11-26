@@ -782,6 +782,18 @@ pub fn invalidate(src: &Path) {
 	let _ = fs::remove_file(stamp_path(src));
 }
 
+/// Turn a generated `Icon=` value into an `IconRef`.
+pub fn icon_ref(icon: &str) -> IconRef {
+	let icon = icon.trim();
+	if let Some(rest) = icon.strip_prefix("file://") {
+		IconRef::Path(PathBuf::from(rest))
+	} else if icon.starts_with('/') || icon.contains('/') || icon.starts_with('.') {
+		IconRef::Path(PathBuf::from(icon))
+	} else {
+		IconRef::Theme(icon.to_string())
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::{expand_exec, icon_file_present, mime_matches, parse_generator};
@@ -883,17 +895,5 @@ mod tests {
 		assert!(expanded.contains("'/cache/out.desktop'"));
 		assert!(expanded.contains("'application/x-test'"));
 		assert!(expanded.ends_with(" %"));
-	}
-}
-
-/// Turn a generated `Icon=` value into an `IconRef`.
-pub fn icon_ref(icon: &str) -> IconRef {
-	let icon = icon.trim();
-	if let Some(rest) = icon.strip_prefix("file://") {
-		IconRef::Path(PathBuf::from(rest))
-	} else if icon.starts_with('/') || icon.contains('/') || icon.starts_with('.') {
-		IconRef::Path(PathBuf::from(icon))
-	} else {
-		IconRef::Theme(icon.to_string())
 	}
 }

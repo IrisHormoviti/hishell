@@ -16,7 +16,9 @@ impl Serialize for ActionId {
 impl<'de> Deserialize<'de> for ActionId {
 	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
 		let value = String::deserialize(deserializer)?;
-		Self::from_str(&value).ok_or_else(|| serde::de::Error::custom("unknown action"))
+		value
+			.parse()
+			.map_err(|_| serde::de::Error::custom("unknown action"))
 	}
 }
 
@@ -51,12 +53,17 @@ impl ActionId {
 	pub fn as_str(self) -> &'static str {
 		self.0
 	}
+}
 
-	pub fn from_str(value: &str) -> Option<Self> {
+impl std::str::FromStr for ActionId {
+	type Err = ();
+
+	fn from_str(value: &str) -> Result<Self, Self::Err> {
 		DESCRIPTORS
 			.iter()
 			.find(|descriptor| descriptor.id.0 == value)
 			.map(|descriptor| descriptor.id)
+			.ok_or(())
 	}
 }
 
@@ -532,7 +539,7 @@ mod tests {
 		let text = serde_json::to_string(&spec).unwrap();
 		let restored: ActionSpec = serde_json::from_str(&text).unwrap();
 		assert_eq!(restored, spec);
-		assert_eq!(ActionId::from_str("rename"), Some(ActionId::RENAME));
-		assert_eq!(ActionId::from_str("nope"), None);
+		assert_eq!("rename".parse(), Ok(ActionId::RENAME));
+		assert_eq!("nope".parse::<ActionId>(), Err(()));
 	}
 }

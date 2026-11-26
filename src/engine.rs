@@ -823,10 +823,7 @@ impl Engine {
 				.collect(),
 			Target::Selection => {
 				let selected = self.selection().map(Selection::items).unwrap_or_default();
-				selected
-					.into_iter()
-					.filter_map(|id| self.item(*id))
-					.collect()
+				selected.iter().filter_map(|id| self.item(*id)).collect()
 			}
 			Target::Items(ids) => ids.iter().filter_map(|id| self.item(*id)).collect(),
 			Target::Auto => {
@@ -835,7 +832,7 @@ impl Engine {
 					selection
 						.map(Selection::items)
 						.unwrap_or_default()
-						.into_iter()
+						.iter()
 						.filter_map(|id| self.item(*id))
 						.collect()
 				} else {
@@ -1311,8 +1308,8 @@ impl Engine {
 				positions: Vec::new(),
 			});
 		}
-		// Empty slots are only navigable inside the laid-out grid, and only
-		// when the folder asks for it.
+		// Empty slots are navigable inside the laid-out grid on a free-placement
+		// grid; sorted grids and lists leave their gaps to group headers.
 		self.focus.apply(FocusCommand::SetGrid {
 			pane,
 			columns: grid_columns,

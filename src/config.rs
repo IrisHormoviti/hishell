@@ -131,7 +131,6 @@ config_keys! {
 	CenterFocus => "Folder Navigation", "CenterFocus", Folder, View, ConfigValue::Bool(true);
 	SmoothScrolling => "Folder Navigation", "SmoothScrolling", Folder, View, ConfigValue::Bool(true);
 	OpenOnClick => "Folder Navigation", "OpenOnClick", Folder, View, ConfigValue::Bool(true);
-
 	DropItemPreference => "Folder Navigation", "DropItemPreference", Folder, View, ConfigValue::Str(String::from("MOVE"));
 	DropItemPreferenceMandate => "Folder Navigation", "DropItemPreferenceMandate", Folder, View, ConfigValue::Bool(false);
 

@@ -327,8 +327,10 @@ mod tests {
 	#[test]
 	fn letters_group_by_initial() {
 		let mut items = vec![item("beta"), item("Alpha"), item("2 things")];
-		let mut config = Config::default();
-		config.group_mode = GroupMode::Letters;
+		let config = Config {
+			group_mode: GroupMode::Letters,
+			..Default::default()
+		};
 		assign(&mut items, &config);
 		let labels: Vec<&str> = items.iter().map(|item| item.group_label.as_str()).collect();
 		assert_eq!(labels, ["2", "A", "B"]);
@@ -343,8 +345,10 @@ mod tests {
 		let mut archive = item("z.zip");
 		archive.mime = Some(String::from("application/zip"));
 		let mut items = vec![archive, item("b.png"), folder];
-		let mut config = Config::default();
-		config.group_mode = GroupMode::Type;
+		let config = Config {
+			group_mode: GroupMode::Type,
+			..Default::default()
+		};
 		assign(&mut items, &config);
 		let labels: Vec<&str> = items.iter().map(|item| item.group_label.as_str()).collect();
 		assert_eq!(labels, ["Folders", "Images", "Archives"]);

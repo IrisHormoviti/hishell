@@ -860,7 +860,7 @@ fn unique_path(parent: &Path, stem: &str, extension: &str) -> PathBuf {
 
 fn rotate_image(path: &Path, degrees: i32) -> Result<(), OpError> {
 	let image = image::open(path).map_err(|error| OpError::Io(error.to_string()))?;
-	let rotated = match (degrees % 360 + 360) % 360 {
+	let rotated = match degrees.rem_euclid(360) {
 		0 => return Ok(()),
 		90 => image.rotate90(),
 		180 => image.rotate180(),
