@@ -2908,6 +2908,38 @@ mod tests {
 	}
 
 	#[test]
+	fn a_merged_root_child_is_a_radio_choice() {
+		let path = temp_folder("radio-merged");
+		let other = temp_folder("radio-merged-other");
+		std::fs::create_dir_all(other.join("choice")).unwrap();
+		std::fs::write(
+			path.join(".directory"),
+			format!(
+				"[Destination]\nFrom = ['{}']\n\n\
+				 [Radio]\nEnabled = true\nOnly = Directories\nSelected =\n\
+				 Exec = /bin/true %v\n",
+				other.display()
+			),
+		)
+		.unwrap();
+		let choice = other.join("choice");
+		let mut engine = Engine::open(&path).unwrap();
+		assert!(engine.is_radio_member(&choice));
+		engine
+			.dispatch(Command::Focus(FocusCommand::Set {
+				pane: PaneId(0),
+				path: choice,
+			}))
+			.unwrap();
+		let outcome = engine.dispatch(Command::Invoke(ActionId::OPEN)).unwrap();
+		assert_eq!(engine.config().radio_selected, "choice");
+		assert!(matches!(outcome.effects.first(), Some(Effect::Launch(_))));
+
+		std::fs::remove_dir_all(path).unwrap();
+		std::fs::remove_dir_all(other).unwrap();
+	}
+
+	#[test]
 	fn navigation_changes_location_and_returns_a_plan() {
 		let path = temp_folder("navigate");
 		let child = path.join("child");

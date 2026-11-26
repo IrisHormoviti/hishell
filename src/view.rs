@@ -562,15 +562,16 @@ pub fn grid_spec(config: &Config, request: &ViewRequest) -> GridSpec {
 		request.viewport.horizontal_scrollbar
 	} else {
 		request.viewport.vertical_scrollbar
-	}
-	.max(small);
-	let main = ((if horizontal {
+	};
+	// The axis the grid may fill, and the same axis after the outer gap. A
+	// frontend that draws no scrollbar asks for none and gets the whole axis.
+	let main_axis = ((if horizontal {
 		request.viewport.height
 	} else {
 		request.viewport.width
-	}) - bar
-		- gap)
+	}) - bar)
 		.max(1.0);
+	let main = (main_axis - gap).max(1.0);
 
 	let padding = if beside || !config.show_labels {
 		small * 2.0
@@ -583,7 +584,13 @@ pub fn grid_spec(config: &Config, request: &ViewRequest) -> GridSpec {
 	let (sizing, lines, icon_size) = match config.grid_sizing() {
 		GridSizing::FixedLines { lines } => {
 			let lines = lines as f64;
-			let cell = (main / lines - gap).min(main / 2.0 - gap);
+			// A single line has no inter-line gaps or outer bands to leave: it
+			// owns the whole axis, so its icons track the viewport height.
+			let cell = if lines <= 1.0 {
+				main_axis
+			} else {
+				main / lines - gap
+			};
 			// Labels below the icon take two lines. In a vertical view the
 			// label sits under the icon on the scrolling axis, so trim the
 			// icon to keep the row compact. In a horizontal view the label
@@ -715,6 +722,23 @@ mod tests {
 		assert_eq!(spec.lines, 4);
 		assert_eq!(spec.sizing, GridSizing::FixedLines { lines: 4 });
 		assert!(spec.icon_size >= 16.0 && spec.icon_size <= 256.0);
+	}
+
+	#[test]
+	fn one_line_sizes_the_icons_to_the_strip() {
+		let mut config = Config::default();
+		config
+			.set(ConfigKey::Lines, ConfigValue::Int(1))
+			.unwrap();
+		config
+			.set(ConfigKey::ScrollDirection, ConfigValue::Str("HORIZONTAL".into()))
+			.unwrap();
+		config
+			.set(ConfigKey::ShowLabels, ConfigValue::Bool(false))
+			.unwrap();
+		let spec = grid_spec(&config, &request(400.0, 56.0));
+		assert_eq!(spec.lines, 1);
+		assert!(spec.icon_size >= 32.0);
 	}
 
 	#[test]

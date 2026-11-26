@@ -32,6 +32,8 @@ impl Default for ScanOptions {
 
 pub struct Folder {
 	path: PathBuf,
+	/// The other folders a `[Destination] From=` list merged beside `path`.
+	roots: Vec<PathBuf>,
 	items: Vec<Item>,
 	by_path: HashMap<PathBuf, ItemId>,
 	order: Vec<ItemId>,
@@ -97,6 +99,7 @@ impl Folder {
 
 		Self {
 			path: path.to_path_buf(),
+			roots: roots.to_vec(),
 			items,
 			by_path,
 			order,
@@ -515,7 +518,7 @@ impl Folder {
 
 	/// Whether this folder's `[Radio]` group accepts `path` as a choice.
 	pub fn is_radio_member(&self, path: &Path, config: &Config) -> bool {
-		radio_member(&self.path, path, config)
+		radio_member(&self.path, &self.roots, path, config)
 	}
 }
 
@@ -619,11 +622,15 @@ pub fn radio_value(path: &Path) -> String {
 }
 
 /// Whether `path` is a direct, selectable child of `folder`'s radio group.
-pub fn radio_member(folder: &Path, path: &Path, config: &Config) -> bool {
+///
+/// A merged folder's choices live in whichever root they came from, so a parent
+/// that is the folder or one of its `[Destination] From=` roots counts.
+pub fn radio_member(folder: &Path, roots: &[PathBuf], path: &Path, config: &Config) -> bool {
 	if !config.radio_enabled {
 		return false;
 	}
-	if path.parent() != Some(folder) {
+	let parent = path.parent();
+	if parent != Some(folder) && !roots.iter().any(|root| parent == Some(root.as_path())) {
 		return false;
 	}
 	if path
