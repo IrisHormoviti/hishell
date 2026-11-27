@@ -204,13 +204,15 @@ impl AppCatalog for FreeDesktopApps {
 
 	fn default_app(&self, path: &Path) -> Option<AppEntry> {
 		let mime = resolved_mime(path);
-		let id = default_application(&mime)?;
-		let (entry_path, fs_kind) = application_entries()
-			.into_iter()
-			.find(|(candidate, ..)| candidate == &id)
-			.map(|(_, path, fs_kind)| (path, fs_kind))?;
-		let entry = Entry::read(&entry_path, fs_kind)?;
-		Some(app_entry(&id, &entry))
+		if let Some(id) = default_application(&mime)
+			&& let Some(entry) = application_entry(&id)
+		{
+			return Some(entry);
+		}
+		// No registered default, or it names an entry that is gone: a handler
+		// that declares the type is still a handler, so OPEN uses it instead
+		// of reporting that nothing can open the file.
+		self.apps_for(path).into_iter().next()
 	}
 
 	fn set_default(&self, mime: &str, app: &AppId) -> Result<(), PlatformError> {
@@ -225,6 +227,15 @@ impl AppCatalog for FreeDesktopApps {
 	}
 }
 
+fn application_entry(id: &str) -> Option<AppEntry> {
+	let (entry_path, fs_kind) = application_entries()
+		.into_iter()
+		.find(|(candidate, ..)| candidate == id)
+		.map(|(_, path, fs_kind)| (path, fs_kind))?;
+	let entry = Entry::read(&entry_path, fs_kind)?;
+	Some(app_entry(id, &entry))
+}
+
 fn app_entry(id: &str, entry: &Entry) -> AppEntry {
 	AppEntry {
 		id: AppId(id.to_string()),
@@ -236,8 +247,11 @@ fn app_entry(id: &str, entry: &Entry) -> AppEntry {
 }
 
 fn mime_matches(entry: &Entry, mime: &str) -> bool {
+	// An entry that declares no MimeType() handles no file type; it is still
+	// launchable from the applications folder, but it must not appear in
+	// "Open With" or become the default for an arbitrary file.
 	let Some(types) = entry_mime_types(entry) else {
-		return true;
+		return false;
 	};
 	types.into_iter().any(|candidate| {
 		candidate == mime
@@ -476,6 +490,24 @@ mod tests {
 		}));
 		assert!(!entries.iter().any(|(id, ..)| id == "nested-app"));
 		assert!(!entries.iter().any(|(id, ..)| id == "plain"));
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn an_entry_without_mime_types_handles_nothing() {
+		let root = std::env::temp_dir().join(format!(
+			"hishell-platform-mime-{}",
+			std::process::id()
+		));
+		std::fs::create_dir_all(&root).unwrap();
+		let file = root.join("plain.desktop");
+		std::fs::write(
+			&file,
+			"[Desktop Entry]\nType=Application\nName=Plain\nExec=true\n",
+		)
+		.unwrap();
+		let entry = Entry::read(&file, crate::item::FsKind::File).unwrap();
+		assert!(!mime_matches(&entry, "text/plain"));
 		std::fs::remove_dir_all(root).unwrap();
 	}
 
